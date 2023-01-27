@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Chart from 'react-apexcharts'
+import Chart from 'react-apexcharts';
+import EEGChannel from './EEGChannel';
 
+function EEGChannelView({ eegChannelData }) {
 
-function EEGChannelView({ channel, samples }) {
-    
     // const chart = {
     //     options: {
     //         chart: {
@@ -20,13 +20,20 @@ function EEGChannelView({ channel, samples }) {
     //         }
     //     ]
     // }
-    
+    console.log("EEGChannelsRender",eegChannelData)
+
     return (
-        <div key={channel}>
-            <h3>{channel}</h3>
-            <p>{samples.length}</p>
+        <div >
             <div>
-                {/* <Chart options={chart.options} series={chart.series} height={500} /> */}
+                EEGChannels
+                {eegChannelData.map((channel) => {
+                    // console.log("map",channel.electrode, channel.name);
+                    <>
+                    <p> {channel.location} {channel.electrode} </p>
+                    <EEGChannel channel={channel} />
+                    </>
+                })}
+
             </div>
 
         </div>
