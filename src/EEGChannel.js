@@ -1,13 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-
+import EEGTrace from './EEGTrace'
 function EEGChannel({ channel}) {
-
-    console.log("EEGChannelRender",channel)
-
     
     return (
-        <div >
-                EEGChannel
+        <div id={channel.electrode}>
+        {channel.location} {channel.electrode} {channel.samples.length} <EEGTrace samples={channel.samples.slice(-500)} />
+
         </div>
     );
 }

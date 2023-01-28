@@ -18,11 +18,6 @@ function MuseData({ onNewData,updateChannelMaps }) {
       setIsConnected(true);
       setIsConnecting(false);
       muse.eegReadings.subscribe(data => {
-        // if (channels.indexOf(data.electrode) < 0) {
-        //   console.log("adding data",data.electrode);
-        //   setChannels(channels => [...channels, data.electrode])
-        // }
-
         onNewData(data);
       });
       updateChannelMaps(["TP9","AF7","AF8","TP10","AUXL","AUXR"]);

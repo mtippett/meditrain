@@ -7,13 +7,31 @@ function DeviceControl() {
 
     const eegChannelData = useRef([]);
     const channelMaps = useRef([]);
-    const [triggerRender,setTriggerRender] = useState(0);
+
+    const [updater, setUpdater] = useState(0);
+    const [viewEEG, setViewEEG] = useState(false)
+    const eegInterval = useRef(0);
+
+    useEffect(
+        () => {
+            if (viewEEG) {
+                eegInterval.current =
+                    setInterval(() => {
+                        setUpdater(updater + 1);
+                    }, 100);
+
+                return function cleanup() {
+                    clearInterval(eegInterval.current);
+                };
+            }
+        },
+        [updater,viewEEG]
+    );
 
     function updateChannelMaps(maps) {
         if (channelMaps.current.length === 0) {
-            console.log("setting maps",channelMaps,[...maps])
+            console.log("setting maps", channelMaps, [...maps])
             channelMaps.current = maps;
-            setTriggerRender(0)
         }
     }
 
@@ -31,15 +49,8 @@ function DeviceControl() {
 
         eegChannelData.current[data.electrode].samples.push(...data.samples);
 
-        setTriggerRender(triggerRender+1)
 
     }
-
-
-
-
-
-    console.log(" DeviceControl render", eegChannelData.current);
 
     return (
         <div>
@@ -48,7 +59,10 @@ function DeviceControl() {
             </div>
             <div>
                 <MuseData onNewData={onNewData} updateChannelMaps={updateChannelMaps} />
-                <EEGChannels eegChannelData={eegChannelData.current}/>
+                <button onClick={() => setViewEEG(!viewEEG)}>View EEG Data</button>
+                {viewEEG &&
+                    <EEGChannels eegChannelData={eegChannelData.current} />
+                }
             </div>
         </div>
     );
