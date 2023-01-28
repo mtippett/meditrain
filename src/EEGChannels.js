@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Chart from 'react-apexcharts';
 import EEGChannel from './EEGChannel';
 
 function EEGChannels({ eegChannelData }) {
