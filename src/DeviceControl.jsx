@@ -59,7 +59,7 @@ function DeviceControl() {
             </div>
             <div>
                 <MuseData onNewData={onNewData} updateChannelMaps={updateChannelMaps} />
-                <button onClick={() => setViewEEG(!viewEEG)}>View EEG Data</button>
+                <button onClick={() => setViewEEG(!viewEEG)}>View EEG Data</button> 
                 {viewEEG &&
                     <EEGChannels eegChannelData={eegChannelData.current} />
                 }

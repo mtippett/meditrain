@@ -13,7 +13,7 @@ function MuseData({ onNewData,updateChannelMaps }) {
   useEffect(() => {
     async function connectToMuse() {
       setIsConnecting(true);
-      muse.enableAux = true;
+      muse.current.enableAux = true;
       await muse.current.connect();
       setIsConnected(true);
       setIsConnecting(false);
@@ -29,7 +29,6 @@ function MuseData({ onNewData,updateChannelMaps }) {
   }, [isConnecting,onNewData,updateChannelMaps ]);
 
 
-  console.log(" MuseData render");
   return (
     <div>
       {!isConnected && !isConnecting && <button onClick={() => setIsConnecting(true)}>Connect to Muse</button>}
