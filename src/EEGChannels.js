@@ -1,4 +1,3 @@
-import React, { useState, useEffect, useRef } from 'react';
 import EEGChannel from './EEGChannel';
 
 function EEGChannels({ eegChannelData }) {
