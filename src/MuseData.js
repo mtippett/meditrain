@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect,useRef } from 'react';
 import { MuseClient } from 'muse-js';
 // import EEGChannel from './EEGChannel';
 
@@ -7,26 +7,26 @@ function MuseData({ onNewData,updateChannelMaps }) {
   // const [channels, setChannels] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const muse = new MuseClient();
+  const muse = useRef(new MuseClient());
   // const channels = useRef([]);
 
   useEffect(() => {
     async function connectToMuse() {
       setIsConnecting(true);
       muse.enableAux = true;
-      await muse.connect();
+      await muse.current.connect();
       setIsConnected(true);
       setIsConnecting(false);
-      muse.eegReadings.subscribe(data => {
+      muse.current.eegReadings.subscribe(data => {
         onNewData(data);
       });
       updateChannelMaps(["TP9","AF7","AF8","TP10","AUXL","AUXR"]);
-      muse.start();
+      muse.current.start();
     }
     if (isConnecting) {
       connectToMuse();
     }
-  }, [isConnecting]);
+  }, [isConnecting,onNewData,updateChannelMaps ]);
 
 
   console.log(" MuseData render");
