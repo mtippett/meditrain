@@ -5,22 +5,30 @@ import TrainingControl from './TrainingControl';
 import TrainingView from './TrainingView';
 import BrainView from './BrainView';
 
+import {  useState } from 'react';
+
 
 function App() {
+  const [eegData,setEEGData] = useState([]);
+
+  function onPeriodgramUpdated(updatedEEGData) {
+    setEEGData([...updatedEEGData]); // Likely too much data is copied
+  }
+
   return (
     <div>
       <div>
         <div>
-          <DeviceControl />
+          <DeviceControl onPeriodgramUpdated={onPeriodgramUpdated}/>
         </div>
         <div>
-          <BandPower />
-          <TrainingControl />
+          <BandPower eegData={eegData}/>
+          <BrainView />
         </div>
       </div>
       <div>
         <TrainingView />
-        <BrainView />
+        <TrainingControl />
       </div>
     </div>
   );

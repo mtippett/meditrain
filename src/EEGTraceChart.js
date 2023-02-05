@@ -14,8 +14,8 @@ function EEGTrace({ samples }) {
 
 
         // Create scales for the x and y axes
-        const xScale = d3.scaleLinear().domain([0, samples.length]).range([0, 500]);
-        const yScale = d3.scaleLinear().domain([d3.min(samples), d3.max(samples)]).range([250, 0]);
+        const xScale = d3.scaleLinear().domain([0, samples.length]).range([0, 100]);
+        const yScale = d3.scaleLinear().domain([d3.min(samples), d3.max(samples)]).range([50, 0]);
 
         // Create the line generator
         const line = d3.line()
@@ -32,14 +32,14 @@ function EEGTrace({ samples }) {
 
         // Append the x and y axes to the SVG
         svg.append('g')
-            .attr('transform', `translate(0, ${250})`)
+            .attr('transform', `translate(0, ${50})`)
             .call(d3.axisBottom(xScale));
 
         svg.append('g')
             .call(d3.axisLeft(yScale));
     }, [samples]);
 
-    return <svg ref={svgRef} width={500} height={250} />;
+    return <svg ref={svgRef} width={100} height={50} />;
 }
 
 export default EEGTrace;
