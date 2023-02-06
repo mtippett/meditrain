@@ -17,8 +17,6 @@ graph TB
 
     subgraph Bands
         BandPower
-        BandPower -.-> |BandPowerData|App
-
     end
 
 
@@ -40,4 +38,7 @@ graph TB
 
     MuseData -.-> |RawEEGData|DeviceControl
     DeviceControl -.-> |EEGData|App
+    DeviceControl -.-> |ChannelMap|App
+    BandPower -.-> |BandPowerData|App
+
 ```
