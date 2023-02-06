@@ -5,33 +5,39 @@ title: Architecture
 graph TB
     App --> DeviceControl
 
-    App-->Views
+    App --> BrainView
+    App-->BandPower
 
     App --> Training
 
-    App --> EEGData
-
-    subgraph EEG
-        EEGData --> EEGChannels
-    end
-
-    subgraph A
-        Training --> Target
-        Training --> Gap
-    end
     
     subgraph Device
         DeviceControl-->MuseData
-        DeviceControl-->EEGChannelView
     end
 
-    subgraph View
-        
-        Views-->BrainView
-        Views-->TrainingView
+    subgraph Bands
+        BandPower
+        BandPower -.-> |BandPowerData|App
+
+    end
+
+
+    subgraph BrainViews
+        EEGChart[[EEGChart]]
+        PeriodGramChart[[PeriodGramChart]]
+        ElectrodeBandPowerChart[[BandPowerChart]]
+        RegionBandPowerChart[[BandPowerChart]]
+        BandPowerBalanceChart[[BandPowerBalanceChart]]
+        BrainView-->ElectrodeView
+        ElectrodeView-->EEGChart
+        ElectrodeView-->PeriodGramChart
+        ElectrodeView-->ElectrodeBandPowerChart
+        BrainView-->RegionView
+        RegionView-->RegionBandPowerChart
+        RegionView-->BandPowerBalanceChart
+
     end
 
     MuseData -.-> |RawEEGData|DeviceControl
-
-    EEGData -.- EEGChannelView
+    DeviceControl -.-> |EEGData|App
 ```
