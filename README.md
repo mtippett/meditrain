@@ -1,70 +1,52 @@
-# Getting Started with Create React App
+# EEG Power Bands Monitor and Operant Conditioning for Meditation
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+This project is a web-based application monitoring and targetting particular 
+EEG power bands ratios during meditation.  It uses  operant conditioning 
+methods to help target particular band powers. The application interfaces 
+with an EEG device to receive real-time EEG data, and displays the EEG power 
+bands (Delta, Theta, Alpha, Beta, Gamma) on a dashboard.
 
-## Available Scripts
+Users can set target power ranges for each band, and the application 
+will provide real-time feedback on the current power levels and whether 
+they are within the target ranges. Users can also receive rewards (e.g.
+visual feedback or audio cues) when their power levels fall within the 
+target ranges, providing positive reinforcement for maintaining the desired 
+power states.
 
-In the project directory, you can run:
+The application is designed to be used for EEG biofeedback training during 
+meditation or other mindfulness practices. By targeting specific EEG power 
+bands associated with relaxation, focus, and other mental states, users can 
+train their brains to achieve these states more easily over time.
 
-### `npm start`
+## Getting Started
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+To use this application, you will need an EEG device that can interface with 
+the application. The application has been tested with the 
+[Muse 2 EEG Headband](https://choosemuse.com/muse-2/), but it may work with 
+other EEG devices as well.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+To set up the application:
 
-### `npm test`
+1. Clone the repository to your local machine.
+2. Install the required dependencies by running `npm install` in the project directory.
+3. Connect your EEG device to your computer and ensure that it is paired and working properly.
+4. Start the application by running `npm start` in the project directory.
+5. Open the application in your web browser by navigating to `http://localhost:3000/`.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+Once the application is running, you should see the EEG power bands 
+dashboard and be able to set target power ranges and receive real-time 
+feedback on your power levels.
 
-### `npm run build`
+## Documentation
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Docs are in the [docs](docs) directory.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Contributing
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+This project is open source and contributions are welcome! If you have ideas 
+for new features or improvements, feel free to submit a pull request or open 
+an issue.
 
-### `npm run eject`
+## License
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.
