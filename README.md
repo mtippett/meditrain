@@ -22,8 +22,13 @@ train their brains to achieve these states more easily over time.
 
 To use this application, you will need an EEG device that can interface with 
 the application. The application has been tested with the 
-[Muse 2 EEG Headband](https://choosemuse.com/muse-2/), but it may work with 
-other EEG devices as well.
+[Muse EEG Headband](https://choosemuse.com/)
+
+### Live Demo
+
+https://mtippett.github.io/meditrain/
+
+### Run Locally
 
 To set up the application:
 
