@@ -5,24 +5,36 @@ import TrainingControl from './TrainingControl';
 import TrainingView from './TrainingView';
 import BrainView from './BrainView';
 
-import {  useState } from 'react';
+import { useState } from 'react';
 
 
 function App() {
-  const [eegData,setEEGData] = useState([]);
+  const [eegData, setEEGData] = useState([]);
+  const [channelMaps, setChannelMaps] = useState([]);
+
+
 
   function onPeriodgramUpdated(updatedEEGData) {
     setEEGData([...updatedEEGData]); // Likely too much data is copied
   }
 
+  function onChannelMapsUpdated(channelMaps) {
+    setChannelMaps([...channelMaps]); // Likely too much data is copied
+  }
+
+  function onBandPowerUpdated(bandPowerData) {
+    console.log("obpu", bandPowerData)
+  }
+
+
   return (
     <div>
       <div>
         <div>
-          <DeviceControl onPeriodgramUpdated={onPeriodgramUpdated}/>
+          <DeviceControl onPeriodgramUpdated={onPeriodgramUpdated} />
         </div>
         <div>
-          <BandPower eegData={eegData}/>
+          <BandPower onBandPowerUpdated={onBandPowerUpdated} eegData={eegData} />
           <BrainView />
         </div>
       </div>

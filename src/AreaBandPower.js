@@ -1,4 +1,3 @@
-import EEGChannel from './EEGChannel';
 
 function AreaBandPower({ bandPower }) {
 

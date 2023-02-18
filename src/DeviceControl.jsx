@@ -3,21 +3,6 @@ import EEGChannels from './EEGChannels';
 import MuseData from './MuseData';
 import { fft, util as fftUtil } from "fft-js"
 
-
-
-// zones are left/right, front/back, frontal/temporal/parietal
-// names for 10-10 (due to muse)
-const electrodeMap_10_10 = {
-    "AF7": { name: "AF7", zones: ["left", "front", "frontal"] },
-    "AF8": { name: "AF8", zones: ["right", "front", "frontal"] },
-    "TP9": { name: "TP9", zones: ["left", "back", "parietal", "temporal"] },
-    "TP10": { name: "TP10", zones: ["right", "back", "parietal", "temporal"] },
-    "C3": { name: "C3", zones: ["left", "back", "frontal", "temporal"] },
-    "C4": { name: "C4", zones: ["right", "back", "frontal", "temporal"] },
-    "AUXL": { name: "AUXL", zones: [] },
-    "AUXR": { name: "AUXR", zones: [] }
-}
-
 function DeviceControl({ onPeriodgramUpdated }) {
 
     const eegChannelData = useRef([]);
@@ -42,6 +27,7 @@ function DeviceControl({ onPeriodgramUpdated }) {
 
                         }
                     });
+                    console.log("ue");
                     onPeriodgramUpdated(eegChannelData.current);
                 }, 1000);
             }
@@ -61,9 +47,12 @@ function DeviceControl({ onPeriodgramUpdated }) {
     function updateChannelMaps(maps) {
         if (channelMaps.current.length === 0) {
 
-            maps.forEach(map => {
-                channelMaps.current.push(electrodeMap_10_10[map])
-            });
+            channelMaps.current = [...maps];
+            console.log("maps", maps, channelMaps);
+            // maps.forEach(map => {
+            //     channelMaps.current.push(electrodeMap_10_10[map])
+            // });
+
             setUpdater(updater + 1);
         }
     }
@@ -77,7 +66,7 @@ function DeviceControl({ onPeriodgramUpdated }) {
             eegChannelData.current[data.electrode] =
             {
                 electrode: data.electrode,
-                location: channelMaps.current[data.electrode],
+                // location: channelMaps.current[data.electrode],
                 samples: [],
                 periodograms: []
             }
@@ -89,47 +78,7 @@ function DeviceControl({ onPeriodgramUpdated }) {
 
     }
 
-    function averagePeriodogram(periodograms) {
-        const averagedPeriodogram = { frequencies: periodograms[0].frequencies, magnitudes: [] }
-        const numPeriodograms = periodograms.length;
-
-        // Use periodogram[0], as a template and average across all 
-        periodograms[0].magnitudes.forEach((element, index) => {
-            let sum = 0;
-            for (let i = 0; i < numPeriodograms; i++) {
-                sum += periodograms[i].magnitudes[index];
-            }
-            averagedPeriodogram.magnitudes[index] = sum / numPeriodograms;
-        });
-
-        // console.log("av", averagedPeriodogram);
-        return averagedPeriodogram;
-
-    }
-
-    function filterEEGData(eegData) {
-        return eegData;
-    }
-    function calcPeriodogram(eegData) {
-
-        // Define the sampling rate and frequency bands
-        const samplingRate = 256;
-
-        // Filter the data to remove unwanted noise
-        // const filteredData = filterData(eegData);
-        const filteredData = filterEEGData(eegData);
-
-        // Perform the FFT on the filtered data
-        const phasors = fft(filteredData);
-
-        const frequencies = fftUtil.fftFreq(phasors, samplingRate);
-        const magnitudes = fftUtil.fftMag(phasors);
-
-        var both = { frequencies: frequencies, magnitudes: magnitudes }
-
-        return both;
-    }
-
+  
     return (
         <div>
             <div>
@@ -138,7 +87,7 @@ function DeviceControl({ onPeriodgramUpdated }) {
             <div>
                 <MuseData onNewData={onNewData} updateChannelMaps={updateChannelMaps} />
                 {channelMaps.current.length !== 0 &&
-                    <button onClick={() => setViewEEG(!viewEEG)}>{viewEEG?"Hide":"View"} EEG Data</button>
+                    <button onClick={() => setViewEEG(!viewEEG)}>{viewEEG ? "Hide" : "View"} EEG Data</button>
                 }
                 {viewEEG &&
                     <EEGChannels eegChannelData={eegChannelData.current} />
@@ -147,5 +96,6 @@ function DeviceControl({ onPeriodgramUpdated }) {
         </div>
     );
 }
+
 
 export default DeviceControl;

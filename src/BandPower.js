@@ -5,10 +5,21 @@ import ComparativeBandPower from './ComparativeBandPower';
 import BandPowerChart from './BandPowerChart';
 
 
-function BandPower({ eegData }) {
+function BandPower({ eegData, onBandPowerUpdated }) {
     const [viewBandPower, setViewBandPower] = useState(false)
     const [allBandPowers, setAllBandPowers] = useState([]);
     const [relativeBandPowers, setRelativeBandPowers] = useState([]);
+
+    // zones are left/right, front/back, frontal/temporal/parietal
+    // names for 10-10 (due to muse)
+    const electrodeMap_10_10 = {
+        "AF7": { name: "AF7", zones: ["left", "front", "frontal"] },
+        "AF8": { name: "AF8", zones: ["right", "front", "frontal"] },
+        "TP9": { name: "TP9", zones: ["left", "back", "parietal", "temporal"] },
+        "TP10": { name: "TP10", zones: ["right", "back", "parietal", "temporal"] },
+        "C3": { name: "C3", zones: ["left", "back", "frontal", "temporal"] },
+        "C4": { name: "C4", zones: ["right", "back", "frontal", "temporal"] }
+    }
 
 
     const bands_transitions =
@@ -45,25 +56,26 @@ function BandPower({ eegData }) {
             bandPowers[band]["relative"] = bandPowers[band].absolute / totalPower;
         };
 
-
         return bandPowers;
     }
 
     let bandPowers = {};
+
+    // calculate electrode band powers
     eegData.forEach((electrode) => {
         if (typeof electrode.averagedPeriodogram !== 'undefined') {
             electrode.bandPowers = calcBandPowers(electrode.averagedPeriodogram);
             bandPowers[electrode.location.name] = [electrode.bandPowers];
-
-            electrode.location.zones.forEach(zone => {
-                if (typeof bandPowers[zone] === 'undefined') {
-                    bandPowers[zone] = [];
-                }
-
-                bandPowers[zone].push(electrode.bandPowers);
-            })
         }
     });
+
+    // electrode.location.zones.forEach(zone => {
+    //     if (typeof bandPowers[zone] === 'undefined') {
+    //         bandPowers[zone] = [];
+    //     }
+
+    //     bandPowers[zone].push(electrode.bandPowers);
+    // })
 
     for (let location in bandPowers) {
         let numElements = bandPowers[location].length;
@@ -111,6 +123,9 @@ function BandPower({ eegData }) {
     // console.log("rbp", relativeBandPowers);
 
     // setAllBandPowers(allBandPowers);
+
+
+    onBandPowerUpdated(allBandPowers);
 
     return (
         <div>
