@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import EEGTraceChart from './EEGTraceChart'
-import EEGPeriodogramChart from './EEGPeriodogramChart'
+import EEGTraceChart from './ui/EEGTraceChart';
+import EEGPeriodogramChart from './ui/EEGPeriodogramChart';
 
 function EEGChannel({ channel }) {
     const [eegView, setEEGView] = useState(false);
@@ -8,7 +8,7 @@ function EEGChannel({ channel }) {
 
     return (
         <div id={channel.electrode}>
-            {channel.location.name} 
+            {/* {channel.location.name}  */}
             {channel.electrode} {channel.samples.length}
             <button onClick={() => { console.log("Flipping EEGView"); setEEGView(!eegView) }}>Toggle EEG</button>
             {eegView &&

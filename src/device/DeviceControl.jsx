@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import EEGChannels from './EEGChannels';
-import MuseData from './MuseData';
-import { fft, util as fftUtil } from "fft-js"
+import EEGChannels from '../EEGChannels';
+import MuseData from '../MuseData';
+import {averagedPeriodogram,calcPeriodogram} from '../math/Periodogram.js'
 
 function DeviceControl({ onPeriodgramUpdated }) {
 
@@ -23,11 +23,11 @@ function DeviceControl({ onPeriodgramUpdated }) {
                         if (electrode.samples.length > 1024) {
                             electrode.periodograms.push(calcPeriodogram(electrode.samples.slice(-1024)));
                             electrode.periodograms = electrode.periodograms.slice(-4);
-                            electrode.averagedPeriodogram = averagePeriodogram(electrode.periodograms);
+                            electrode.averagedPeriodogram = averagedPeriodogram(electrode.periodograms);
 
                         }
                     });
-                    console.log("ue");
+                    // console.log("ue");
                     onPeriodgramUpdated(eegChannelData.current);
                 }, 1000);
             }
@@ -71,6 +71,8 @@ function DeviceControl({ onPeriodgramUpdated }) {
                 periodograms: []
             }
         }
+
+        // console.log("onNewData", data);
 
         const samples = eegChannelData.current[data.electrode].samples
         samples.push(...data.samples);

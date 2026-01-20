@@ -1,4 +1,6 @@
 # General Overview
+
+Supplementary documents: see `docs/design.md` for component responsibilities and data contracts, and `docs/requirements.md` for functional and non-functional goals.
 ```mermaid
 ---
 title: Architecture

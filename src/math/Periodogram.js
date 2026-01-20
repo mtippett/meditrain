@@ -1,4 +1,7 @@
-function averagePeriodogram(periodograms) {
+import { fft, util as fftUtil } from "fft-js"
+
+
+export function averagedPeriodogram(periodograms) {
     const averagedPeriodogram = { frequencies: periodograms[0].frequencies, magnitudes: [] }
     const numPeriodograms = periodograms.length;
 
@@ -16,10 +19,10 @@ function averagePeriodogram(periodograms) {
 
 }
 
-function filterEEGData(eegData) {
+export function filterEEGData(eegData) {
     return eegData;
 }
-function calcPeriodogram(eegData) {
+export function calcPeriodogram(eegData) {
 
     // Define the sampling rate and frequency bands
     const samplingRate = 256;
@@ -38,3 +41,4 @@ function calcPeriodogram(eegData) {
 
     return both;
 }
+

@@ -1,25 +1,20 @@
-import React, { useState, useRef } from 'react';
-import ElectrodeBandPower from './BandPowerChart';
-import AreaBandPower from './AreaBandPower';
-import ComparativeBandPower from './ComparativeBandPower';
+import React, { useState } from 'react';
 import BandPowerChart from './BandPowerChart';
 
 
 function BandPower({ eegData, onBandPowerUpdated }) {
-    const [viewBandPower, setViewBandPower] = useState(false)
-    const [allBandPowers, setAllBandPowers] = useState([]);
-    const [relativeBandPowers, setRelativeBandPowers] = useState([]);
+    const [viewBandPower, setViewBandPower] = useState(false);
 
     // zones are left/right, front/back, frontal/temporal/parietal
     // names for 10-10 (due to muse)
-    const electrodeMap_10_10 = {
-        "AF7": { name: "AF7", zones: ["left", "front", "frontal"] },
-        "AF8": { name: "AF8", zones: ["right", "front", "frontal"] },
-        "TP9": { name: "TP9", zones: ["left", "back", "parietal", "temporal"] },
-        "TP10": { name: "TP10", zones: ["right", "back", "parietal", "temporal"] },
-        "C3": { name: "C3", zones: ["left", "back", "frontal", "temporal"] },
-        "C4": { name: "C4", zones: ["right", "back", "frontal", "temporal"] }
-    }
+    // const electrodeMap_10_10 = {
+    //     "AF7": { name: "AF7", zones: ["left", "front", "frontal"] },
+    //     "AF8": { name: "AF8", zones: ["right", "front", "frontal"] },
+    //     "TP9": { name: "TP9", zones: ["left", "back", "parietal", "temporal"] },
+    //     "TP10": { name: "TP10", zones: ["right", "back", "parietal", "temporal"] },
+    //     "C3": { name: "C3", zones: ["left", "back", "frontal", "temporal"] },
+    //     "C4": { name: "C4", zones: ["right", "back", "frontal", "temporal"] }
+    // };
 
 
     const bands_transitions =
@@ -59,13 +54,14 @@ function BandPower({ eegData, onBandPowerUpdated }) {
         return bandPowers;
     }
 
-    let bandPowers = {};
+    const bandPowers = {};
 
     // calculate electrode band powers
     eegData.forEach((electrode) => {
         if (typeof electrode.averagedPeriodogram !== 'undefined') {
             electrode.bandPowers = calcBandPowers(electrode.averagedPeriodogram);
-            bandPowers[electrode.location.name] = [electrode.bandPowers];
+            console.log(electrode.bandPowers)
+            // bandPowers[electrode.location.name] = [electrode.bandPowers];
         }
     });
 
@@ -77,6 +73,7 @@ function BandPower({ eegData, onBandPowerUpdated }) {
     //     bandPowers[zone].push(electrode.bandPowers);
     // })
 
+    const allBandPowers = {};
     for (let location in bandPowers) {
         let numElements = bandPowers[location].length;
         let averagedBand = bandPowers[location].reduce((acc, value, index, array) => {
@@ -103,6 +100,7 @@ function BandPower({ eegData, onBandPowerUpdated }) {
         })
     }
 
+    const relativeBandPowers = {};
     if (typeof allBandPowers["left"] !== 'undefined') {
         if (typeof relativeBandPowers["left-right"] === 'undefined') {
             relativeBandPowers["left-right"] = {};
