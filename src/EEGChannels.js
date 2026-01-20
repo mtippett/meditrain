@@ -1,17 +1,17 @@
 import EEGChannel from './EEGChannel';
 
-function EEGChannels({ eegChannelData }) {
+function EEGChannels({ eegChannelData, showPeriodograms = true }) {
+  const channels = eegChannelData.filter(Boolean);
 
-    return (
-        <div >
-            <div>
-                {eegChannelData.map((channel) =>
-                    <EEGChannel key={channel.electrode} channel={channel} />
-                )}
-            </div>
-
-        </div>
-    );
+  return (
+    <div>
+      <div>
+        {channels.map((channel) =>
+          <EEGChannel key={channel.electrode} channel={channel} showPeriodograms={showPeriodograms} />
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default EEGChannels;

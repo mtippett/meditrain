@@ -1,45 +1,59 @@
-import React, { useEffect, useRef } from 'react';
-import * as d3 from 'd3';
+import React, { useMemo } from 'react';
 
-function EEGTrace({ samples }) {
+/**
+ * Lightweight EEG trace renderer.
+ * - Uses a simple SVG polyline (no D3 dependency).
+ * - Automatically downsamples large arrays for performance.
+ * - Scales to the parent width via viewBox; height is explicit.
+ */
+function EEGTraceChart({ samples = [], height = 80, maxPoints = 800 }) {
+  const trace = useMemo(() => {
+    if (!samples || samples.length === 0) return null;
 
-    const svgRef = useRef(null);
+    // Downsample uniformly if too many points
+    const step = Math.max(1, Math.ceil(samples.length / maxPoints));
+    const reduced = [];
+    for (let i = 0; i < samples.length; i += step) {
+      reduced.push({ x: i, y: samples[i] });
+    }
 
-    useEffect(() => {
-        if (!svgRef.current) return;
+    const ys = reduced.map(p => p.y);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const pad = ((maxY - minY) || Math.abs(maxY) || 1) * 0.1;
+    const yMin = minY - pad;
+    const yMax = maxY + pad;
 
-        // d3.selectAll("svg > *").remove();
-        const svg = d3.select(svgRef.current);
-        svg.selectAll('*').remove();
+    const points = reduced.map(({ x, y }) => {
+      const scaledY = ((y - yMin) / (yMax - yMin + 1e-9)) * height;
+      return `${x},${height - scaledY}`;
+    }).join(' ');
 
+    return {
+      points,
+      width: reduced.length > 0 ? reduced[reduced.length - 1].x || 1 : 1
+    };
+  }, [samples, height, maxPoints]);
 
-        // Create scales for the x and y axes
-        const xScale = d3.scaleLinear().domain([0, samples.length]).range([0, 100]);
-        const yScale = d3.scaleLinear().domain([d3.min(samples), d3.max(samples)]).range([50, 0]);
+  if (!trace) {
+    return <p className="subdued">No samples yet.</p>;
+  }
 
-        // Create the line generator
-        const line = d3.line()
-            .x((d, i) => xScale(i))
-            .y(d => yScale(d))
-
-        // Append the line path to the SVG
-        svg.append('path')
-            .datum(samples)
-            .attr('fill', 'none')
-            .attr('stroke', 'steelblue')
-            .attr('stroke-width', 1)
-            .attr('d', line);
-
-        // Append the x and y axes to the SVG
-        svg.append('g')
-            .attr('transform', `translate(0, ${50})`)
-            .call(d3.axisBottom(xScale));
-
-        svg.append('g')
-            .call(d3.axisLeft(yScale));
-    }, [samples]);
-
-    return <svg ref={svgRef} width={100} height={50} />;
+  return (
+    <svg
+      width="100%"
+      height={height}
+      viewBox={`0 0 ${trace.width} ${height}`}
+      preserveAspectRatio="none"
+    >
+      <polyline
+        fill="none"
+        stroke="#4ade80"
+        strokeWidth="1.2"
+        points={trace.points}
+      />
+    </svg>
+  );
 }
 
-export default EEGTrace;
+export default EEGTraceChart;

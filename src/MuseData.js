@@ -1,41 +1,100 @@
-import React, { useState, useEffect,useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { MuseClient } from 'muse-js';
-// import EEGChannel from './EEGChannel';
 
-function MuseData({ onNewData,updateChannelMaps }) {
-  // const [eegData, setEegData] = useState([]);
-  // const [channels, setChannels] = useState([]);
+/**
+ * Handles Muse connection with simple lifecycle:
+ * - Creates a fresh client for each connect attempt.
+ * - Cleans up subscriptions/listeners on disconnect or errors.
+ * - Surfaces status and allows manual reconnects.
+ */
+function MuseData({ onNewData, updateChannelMaps }) {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const muse = useRef(new MuseClient());
-  // const channels = useRef([]);
+  const [error, setError] = useState(null);
+  const clientRef = useRef(null);
+  const subRef = useRef(null);
+
+  async function safeDisconnect() {
+    try {
+      if (clientRef.current?.device && clientRef.current._onDisconnect) {
+        clientRef.current.device.removeEventListener('gattserverdisconnected', clientRef.current._onDisconnect);
+      }
+    } catch (e) {
+      // ignore
+    }
+    try {
+      subRef.current?.unsubscribe();
+    } catch (e) {
+      // ignore
+    }
+    subRef.current = null;
+    try {
+      await clientRef.current?.disconnect();
+    } catch (e) {
+      // ignore
+    }
+    clientRef.current = null;
+  }
+
+  async function connect() {
+    setIsConnecting(true);
+    setError(null);
+
+    const client = new MuseClient();
+    clientRef.current = client;
+
+    try {
+      client.enableAux = true;
+      await client.connect();
+
+      // Attach disconnect handler bound to this client
+      const onDisconnect = () => {
+        setIsConnected(false);
+        setIsConnecting(false);
+        setError('Device disconnected');
+        safeDisconnect();
+      };
+      client._onDisconnect = onDisconnect;
+      client.device?.addEventListener('gattserverdisconnected', onDisconnect);
+
+      subRef.current = client.eegReadings.subscribe(data => onNewData(data));
+      updateChannelMaps(["TP9", "AF7", "AF8", "TP10", "AUXL", "AUXR"]);
+      await client.start();
+      setIsConnected(true);
+    } catch (err) {
+      setError(err?.message || 'Unable to connect');
+      await safeDisconnect();
+      setIsConnected(false);
+    } finally {
+      setIsConnecting(false);
+    }
+  }
 
   useEffect(() => {
-    async function connectToMuse() {
-      setIsConnecting(true);
-      muse.current.enableAux = true;
-      await muse.current.connect();
-      setIsConnected(true);
-      setIsConnecting(false);
-      muse.current.eegReadings.subscribe(data => {
-        onNewData(data);
-      });
-      updateChannelMaps(["TP9","AF7","AF8","TP10","AUXL","AUXR"]);
-      muse.current.start();
-    }
-    if (isConnecting) {
-      connectToMuse();
-    }
-  }, [isConnecting,onNewData,updateChannelMaps ]);
+    return () => {
+      safeDisconnect();
+    };
+  }, []);
 
+  async function onManualDisconnect() {
+    await safeDisconnect();
+    setIsConnected(false);
+    setIsConnecting(false);
+    setError('Disconnected');
+  }
 
   return (
     <div>
-      {!isConnected && !isConnecting && <button onClick={() => setIsConnecting(true)}>Connect to Muse</button>}
+      {!isConnected && !isConnecting && <button onClick={connect}>Connect to Muse</button>}
       {isConnecting && <p>Connecting to Muse...</p>}
-      {isConnected &&
-        <p>Connected to EEG </p>
-      }
+      {isConnected && (
+        <div className="inline-buttons">
+          <p>Connected to EEG</p>
+          <button onClick={onManualDisconnect}>Disconnect</button>
+        </div>
+      )}
+      {!isConnected && !isConnecting && error && <p className="subdued">Status: {error}</p>}
+      {isConnected && error && <p className="subdued">Status: {error}</p>}
     </div>
   );
 }

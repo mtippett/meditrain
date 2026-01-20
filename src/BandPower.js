@@ -1,157 +1,109 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import BandPowerChart from './BandPowerChart';
 
+const STANDARD_BANDS = [
+  { key: 'delta', label: 'Delta', min: 0.5, max: 4 },
+  { key: 'theta', label: 'Theta', min: 4, max: 8 },
+  { key: 'alpha', label: 'Alpha', min: 8, max: 12 },
+  { key: 'beta', label: 'Beta', min: 12, max: 30 },
+  { key: 'gamma', label: 'Gamma', min: 30, max: 10000 }
+];
+
+const MAX_HISTORY = 120;
 
 function BandPower({ eegData, onBandPowerUpdated }) {
-    const [viewBandPower, setViewBandPower] = useState(false);
+  const [bandHistory, setBandHistory] = useState({});
 
-    // zones are left/right, front/back, frontal/temporal/parietal
-    // names for 10-10 (due to muse)
-    // const electrodeMap_10_10 = {
-    //     "AF7": { name: "AF7", zones: ["left", "front", "frontal"] },
-    //     "AF8": { name: "AF8", zones: ["right", "front", "frontal"] },
-    //     "TP9": { name: "TP9", zones: ["left", "back", "parietal", "temporal"] },
-    //     "TP10": { name: "TP10", zones: ["right", "back", "parietal", "temporal"] },
-    //     "C3": { name: "C3", zones: ["left", "back", "frontal", "temporal"] },
-    //     "C4": { name: "C4", zones: ["right", "back", "frontal", "temporal"] }
-    // };
+  const calcBandPowers = useMemo(
+    () => (periodogram) => {
+      const bandPowers = {};
+      let totalPower = 0;
 
+      STANDARD_BANDS.forEach(({ key }) => {
+        bandPowers[key] = { absolute: 0, relative: 0 };
+      });
 
-    const bands_transitions =
-        [
-            { band: "delta", min: 0.5, max: 4 },
-            { band: "theta", min: 4, max: 8 },
-            { band: "alpha", min: 8, max: 12 },
-            { band: "beta", min: 12, max: 30 },
-            { band: "gamma", min: 30, max: 10000 }
-        ];
+      periodogram.frequencies.forEach((frequency, index) => {
+        const power = periodogram.magnitudes[index] ** 2;
+        const band = STANDARD_BANDS.find(b => frequency >= b.min && frequency < b.max);
+        if (band) {
+          bandPowers[band.key].absolute += power;
+          totalPower += power;
+        }
+      });
 
+      if (totalPower > 0) {
+        STANDARD_BANDS.forEach(({ key }) => {
+          bandPowers[key].relative = bandPowers[key].absolute / totalPower;
+        });
+      }
 
-    function calcBandPowers(periodogram) {
-        const bandPowers = {};
+      return bandPowers;
+    },
+    []
+  );
 
-        let currentBand = 0;
-        let totalPower = 0;
-        bandPowers[bands_transitions[currentBand].band] = { absolute: 0 };
+  useEffect(() => {
+    setBandHistory((prev) => {
+      const next = { ...prev };
+      const snapshots = [];
+      const activeLabels = new Set();
 
-        periodogram.frequencies.forEach((frequency, index) => {
-            if (frequency >= bands_transitions[currentBand].max) {
-                currentBand++;
-                bandPowers[bands_transitions[currentBand].band] = { absolute: 0 };
+      eegData
+        .filter(electrode => typeof electrode.averagedPeriodogram !== 'undefined')
+        .forEach(electrode => {
+          const label = electrode.label || electrode.electrode;
+          const bandPowers = calcBandPowers(electrode.averagedPeriodogram);
+          electrode.bandPowers = bandPowers;
+          activeLabels.add(label);
+
+          if (!next[label]) next[label] = {};
+          STANDARD_BANDS.forEach(({ key }) => {
+            if (!next[label][key]) next[label][key] = [];
+            next[label][key].push(bandPowers[key].relative || 0);
+            if (next[label][key].length > MAX_HISTORY) {
+              next[label][key].shift();
             }
+          });
 
-            if ((frequency >= bands_transitions[currentBand].min) && (frequency < bands_transitions[currentBand].max)) {
-                let power = periodogram.magnitudes[index] ** 2;
-                totalPower += power;
-                bandPowers[bands_transitions[currentBand].band].absolute += power;
-            }
+          snapshots.push({ label, bands: bandPowers });
         });
 
-        for (let band in bandPowers) {
-            bandPowers[band]["relative"] = bandPowers[band].absolute / totalPower;
-        };
-
-        return bandPowers;
-    }
-
-    const bandPowers = {};
-
-    // calculate electrode band powers
-    eegData.forEach((electrode) => {
-        if (typeof electrode.averagedPeriodogram !== 'undefined') {
-            electrode.bandPowers = calcBandPowers(electrode.averagedPeriodogram);
-            console.log(electrode.bandPowers)
-            // bandPowers[electrode.location.name] = [electrode.bandPowers];
+      // prune history for channels no longer active/selected
+      Object.keys(next).forEach(label => {
+        if (!activeLabels.has(label)) {
+          delete next[label];
         }
+      });
+
+      onBandPowerUpdated(snapshots);
+      return next;
     });
+  }, [calcBandPowers, eegData, onBandPowerUpdated]);
 
-    // electrode.location.zones.forEach(zone => {
-    //     if (typeof bandPowers[zone] === 'undefined') {
-    //         bandPowers[zone] = [];
-    //     }
+  const historyEntries = Object.entries(bandHistory);
 
-    //     bandPowers[zone].push(electrode.bandPowers);
-    // })
+  return (
+    <div>
+      <div className="panel-heading" style={{ marginTop: 8 }}>
+        <h3>Band Power Over Time</h3>
+        <span className="subdued">Overlayed lines per band (relative power)</span>
+      </div>
 
-    const allBandPowers = {};
-    for (let location in bandPowers) {
-        let numElements = bandPowers[location].length;
-        let averagedBand = bandPowers[location].reduce((acc, value, index, array) => {
-
-            Object.keys(value).forEach(band => {
-                if (typeof acc[band] === 'undefined')
-                    acc[band] = 0;
-
-                acc[band] += value[band].relative / numElements;
-
-            })
-
-            return acc;
-        }, {});
-
-        if (typeof allBandPowers[location] === 'undefined')
-            allBandPowers[location] = {};
-
-        Object.keys(averagedBand).forEach(band => {
-            if (typeof allBandPowers[location][band] === 'undefined')
-                allBandPowers[location][band] = [];
-
-            allBandPowers[location][band].push(averagedBand[band]);
-        })
-    }
-
-    const relativeBandPowers = {};
-    if (typeof allBandPowers["left"] !== 'undefined') {
-        if (typeof relativeBandPowers["left-right"] === 'undefined') {
-            relativeBandPowers["left-right"] = {};
-            relativeBandPowers["front-back"] = {};
-        }
-        // console.log("relative1", relativeBandPowers, "left", allBandPowers["left"],"right",allBandPowers["right"])
-
-        Object.keys(allBandPowers["left"]).forEach(band => {
-            if (typeof relativeBandPowers["left-right"][band] === 'undefined') {
-                relativeBandPowers["left-right"][band] = [];
-                relativeBandPowers["front-back"][band] = [];
-            }
-            // console.log("relative2", relativeBandPowers, allBandPowers["left"][band].slice(-1), allBandPowers["right"][band].slice(-1))
-            relativeBandPowers["left-right"][band].push(allBandPowers["left"][band].slice(-1) - allBandPowers["right"][band].slice(-1));
-            relativeBandPowers["front-back"][band].push(allBandPowers["front"][band].slice(-1) - allBandPowers["back"][band].slice(-1));
-        });
-    }
-    // console.log("rbp", relativeBandPowers);
-
-    // setAllBandPowers(allBandPowers);
-
-
-    onBandPowerUpdated(allBandPowers);
-
-    return (
-        <div>
-            <button onClick={() => setViewBandPower(!viewBandPower)}>{viewBandPower ? "Hide" : "View"} Band Power</button>
-            {viewBandPower &&
-                Object.keys(allBandPowers).map((channel, index, array) => {
-                    return (
-                        <>
-                            {array[index]}
-                            <BandPowerChart key={array[index]} channel={{ ...allBandPowers[channel] }} />
-                        </>
-                    )
-                }
-                )
-            }
-            {viewBandPower &&
-                Object.keys(relativeBandPowers).map((channel, index, array) => {
-                    return (
-                        <div>
-                            {array[index]}
-                            <BandPowerChart key={array[index]} channel={{ ...relativeBandPowers[channel] }} />
-                        </div>
-                    )
-                }
-                )
-            }
-        </div >
-    );
+      <div className="band-grid">
+        {historyEntries.length === 0 && <p className="subdued">Waiting for spectra to compute band power.</p>}
+        {historyEntries.map(([label, bands]) => (
+          <div className="band-card" key={label}>
+            <div className="band-card-header">
+              <p className="eyebrow">{label}</p>
+              <span className="channel-meta">Relative power history</span>
+            </div>
+            <BandPowerChart channel={bands} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export default BandPower;
