@@ -26,13 +26,13 @@ function spectroColor(t) {
   return lerpColor(stops[i], stops[i + 1], frac);
 }
 
-function Spectrogram({ eegData, selectedChannels }) {
+function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
   const [histories, setHistories] = useState({});
   const [channelPeaks, setChannelPeaks] = useState({});
-  const maxSlices = 40;
-  const maxFreq = 50; // focus on meditation-relevant bands
+  const maxFreq = 50; // focus on meditation-relevant bands and align with periodograms
   const svgRef = useRef(null);
   const [plotWidth, setPlotWidth] = useState(500);
+  const lastSignatureRef = useRef({});
 
   const channelsWithSpectra = useMemo(() => {
     const targets = selectedChannels.length ? selectedChannels : eegData.map(c => c.label || c.electrode);
@@ -52,6 +52,8 @@ function Spectrogram({ eegData, selectedChannels }) {
   useEffect(() => {
     if (channelsWithSpectra.length === 0) return;
 
+    const windowMs = windowSeconds * 1000;
+
     setHistories((prev) => {
       const next = { ...prev };
       const labels = new Set();
@@ -68,9 +70,20 @@ function Spectrogram({ eegData, selectedChannels }) {
         const freqs = indices.map(({ f }) => f);
         const slice = { freqs, magnitudes, timestamp: Date.now() };
 
+        // Skip if data is unchanged to avoid flat updates
+        const signature = magnitudes.reduce((sum, v) => sum + v, 0);
+        const lastSig = lastSignatureRef.current[label];
+        if (lastSig && lastSig.len === magnitudes.length && Math.abs(lastSig.sig - signature) < 1e-9) {
+          return;
+        }
+        lastSignatureRef.current[label] = { len: magnitudes.length, sig: signature };
+
         const existing = next[label] || [];
         const updated = [...existing, slice];
-        if (updated.length > maxSlices) updated.shift();
+        // prune by time window rather than count only
+        while (updated.length && (slice.timestamp - updated[0].timestamp) > windowMs) {
+          updated.shift();
+        }
         next[label] = updated;
       });
 
@@ -96,7 +109,7 @@ function Spectrogram({ eegData, selectedChannels }) {
       });
       return next;
     });
-  }, [channelsWithSpectra, maxSlices, maxFreq]);
+  }, [channelsWithSpectra, windowSeconds, maxFreq]);
 
   const labels = Object.keys(histories);
   if (labels.length === 0) {
@@ -104,28 +117,42 @@ function Spectrogram({ eegData, selectedChannels }) {
   }
 
   const rowHeight = 180;
-  const height = labels.length * rowHeight;
+  const axisHeight = 20;
+  const height = labels.length * rowHeight + axisHeight;
+
+  // precompute global dB range for consistent scale
+  let globalMaxDb = -Infinity;
+  let globalMinDb = Infinity;
+  const channelDbSlices = {};
+  labels.forEach(label => {
+    const history = histories[label];
+    if (!history || history.length === 0) return;
+    const EPS = 1e-12;
+    const dbSlices = history.map(slice => slice.magnitudes.map(m => 10 * Math.log10(Math.max(m, EPS))));
+    channelDbSlices[label] = dbSlices;
+    dbSlices.flat().forEach(v => {
+      if (v > globalMaxDb) globalMaxDb = v;
+      if (v < globalMinDb) globalMinDb = v;
+    });
+  });
+  if (!isFinite(globalMaxDb)) globalMaxDb = -60;
+  if (!isFinite(globalMinDb)) globalMinDb = -120;
+  const globalMinWindowed = Math.max(globalMaxDb - 60, globalMinDb);
+  const globalRange = Math.max(1, globalMaxDb - globalMinWindowed);
 
   return (
     <svg ref={svgRef} width="100%" height={height} className="spectrogram">
       {labels.map((label, idx) => {
         const history = histories[label];
-        const peak = channelPeaks[label];
         if (!history || history.length === 0) return null;
 
         const sliceWidth = plotWidth / history.length;
         const freqBins = history[0].freqs.length || 1;
         const binHeight = rowHeight / freqBins;
-        const EPS = 1e-12;
-        const dbSlices = history.map(slice => slice.magnitudes.map(m => 10 * Math.log10(Math.max(m, EPS))));
-        const allDb = dbSlices.flat();
-        const peakDb = peak ? 10 * Math.log10(Math.max(peak, EPS)) : Math.max(...allDb);
-        const minDbLocal = Math.min(...allDb);
-        const minDb = Math.max(peakDb - 60, minDbLocal);
-        const rangeDb = peakDb - minDb || 1;
+        const dbSlices = channelDbSlices[label] || [];
 
         const colorForValue = (vDb) => {
-          const t = (Math.max(vDb, minDb) - minDb) / rangeDb;
+          const t = (Math.max(vDb, globalMinWindowed) - globalMinWindowed) / globalRange;
           return spectroColor(t);
         };
 
@@ -178,6 +205,32 @@ function Spectrogram({ eegData, selectedChannels }) {
           </g>
         );
       })}
+      {/* simple time scale */}
+      {labels.length > 0 && histories[labels[0]]?.length > 1 && (
+        (() => {
+          const durationSec = Math.max(1, Math.round(windowSeconds));
+          const ticks = 4;
+          const texts = [];
+          for (let i = 0; i <= ticks; i++) {
+            const t = i / ticks;
+            const x = t * plotWidth;
+            const label = i === ticks ? '0s' : `-${Math.round((1 - t) * durationSec)}s`;
+            texts.push(
+              <text
+                key={`axis-${i}`}
+                x={x}
+                y={height - 4}
+                fill="rgba(255,255,255,0.6)"
+                fontSize="10"
+                textAnchor={i === ticks ? 'end' : i === 0 ? 'start' : 'middle'}
+              >
+                {label}
+              </text>
+            );
+          }
+          return texts;
+        })()
+      )}
     </svg>
   );
 }

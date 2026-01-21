@@ -8,6 +8,7 @@ import * as d3 from 'd3';
 function MultiEEGTraceChart({ channels = [], windowSize = 4096, height = 220 }) {
   const svgRef = useRef(null);
   const [plotWidth, setPlotWidth] = useState(400);
+  const sampleRate = 256; // Hz
 
   const series = useMemo(() => {
     const colors = d3.schemeTableau10;
@@ -41,7 +42,9 @@ function MultiEEGTraceChart({ channels = [], windowSize = 4096, height = 220 }) 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
-    const bandHeight = height / series.length;
+    const marginBottom = 20;
+    const innerHeight = height - marginBottom;
+    const bandHeight = innerHeight / series.length;
     series.forEach((s, idx) => {
       const yOffset = idx * bandHeight;
       const xScale = d3.scaleLinear().domain([0, s.samples.length]).range([0, plotWidth]);
@@ -64,7 +67,23 @@ function MultiEEGTraceChart({ channels = [], windowSize = 4096, height = 220 }) 
         .attr('font-size', 10)
         .text(s.id);
     });
-  }, [series, height, plotWidth]);
+
+    // time scale
+    const durationSec = windowSize / sampleRate;
+    const ticks = 4;
+    for (let i = 0; i <= ticks; i++) {
+      const t = i / ticks;
+      const x = t * plotWidth;
+      const label = `-${Math.round((1 - t) * durationSec)}s`;
+      svg.append('text')
+        .attr('x', x)
+        .attr('y', height - 4)
+        .attr('fill', 'rgba(255,255,255,0.6)')
+        .attr('font-size', 10)
+        .attr('text-anchor', i === ticks ? 'end' : i === 0 ? 'start' : 'middle')
+        .text(i === ticks ? '0s' : label);
+    }
+  }, [series, height, plotWidth, windowSize, sampleRate]);
 
   if (series.length === 0) {
     return <p className="subdued">No samples to plot.</p>;

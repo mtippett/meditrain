@@ -4,12 +4,10 @@ function EEGChannels({ eegChannelData, showPeriodograms = true }) {
   const channels = eegChannelData.filter(Boolean);
 
   return (
-    <div>
-      <div>
-        {channels.map((channel) =>
-          <EEGChannel key={channel.electrode} channel={channel} showPeriodograms={showPeriodograms} />
-        )}
-      </div>
+    <div className="channel-grid">
+      {channels.map((channel) => (
+        <EEGChannel key={channel.electrode} channel={channel} showPeriodograms={showPeriodograms} />
+      ))}
     </div>
   );
 }

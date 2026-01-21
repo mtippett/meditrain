@@ -130,6 +130,22 @@
   font-size: 14px;
 }
 
+.panel-controls {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.panel.fullscreen {
+  position: fixed;
+  inset: 12px;
+  z-index: 999;
+  max-width: none;
+  width: auto;
+  height: auto;
+  overflow: auto;
+}
+
 .panel p {
   margin: 0 0 12px;
   color: var(--muted);
@@ -407,6 +423,110 @@ button:active {
   background: var(--accent);
   animation: pulse 1s infinite;
 }
+
+.training-control {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.training-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  background: var(--card-strong);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.training-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.training-form label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.training-form input,
+.training-form select {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--text);
+}
+
+.inline-buttons .field {
+  min-width: 180px;
+}
+
+.target-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.target-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  color: var(--text);
+}
+
+.target-delta {
+  margin-left: 8px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.target-ok {
+  border-color: #22c55e;
+}
+
+.target-miss {
+  border-color: #f87171;
+}
+
+.band-legend {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 12px;
+}
+
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card-strong);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.legend-chip::before {
+  content: '';
+  width: 12px;
+  height: 4px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.legend-delta { color: #22c55e; }
+.legend-theta { color: #facc15; }
+.legend-alpha { color: #f97316; }
+.legend-beta { color: #06b6d4; }
+.legend-gamma { color: #8b5cf6; }
 
 .brain-map {
   position: relative;

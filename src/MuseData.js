@@ -7,12 +7,12 @@ import { MuseClient } from 'muse-js';
  * - Cleans up subscriptions/listeners on disconnect or errors.
  * - Surfaces status and allows manual reconnects.
  */
-function MuseData({ onNewData, updateChannelMaps }) {
+function MuseData({ onNewData, updateChannelMaps, onTelemetry, onPpg, onAccelerometer, onGyro }) {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState(null);
   const clientRef = useRef(null);
-  const subRef = useRef(null);
+  const subRef = useRef([]);
 
   async function safeDisconnect() {
     try {
@@ -23,11 +23,11 @@ function MuseData({ onNewData, updateChannelMaps }) {
       // ignore
     }
     try {
-      subRef.current?.unsubscribe();
+      subRef.current.forEach(sub => sub?.unsubscribe?.());
     } catch (e) {
       // ignore
     }
-    subRef.current = null;
+    subRef.current = [];
     try {
       await clientRef.current?.disconnect();
     } catch (e) {
@@ -45,6 +45,7 @@ function MuseData({ onNewData, updateChannelMaps }) {
 
     try {
       client.enableAux = true;
+      client.enablePpg = true; // surface all supported streams
       await client.connect();
 
       // Attach disconnect handler bound to this client
@@ -57,7 +58,20 @@ function MuseData({ onNewData, updateChannelMaps }) {
       client._onDisconnect = onDisconnect;
       client.device?.addEventListener('gattserverdisconnected', onDisconnect);
 
-      subRef.current = client.eegReadings.subscribe(data => onNewData(data));
+      subRef.current = [];
+      subRef.current.push(client.eegReadings.subscribe(data => onNewData(data)));
+      if (client.telemetryData && onTelemetry) {
+        subRef.current.push(client.telemetryData.subscribe(t => onTelemetry(t)));
+      }
+      if (client.ppgReadings && onPpg) {
+        subRef.current.push(client.ppgReadings.subscribe(p => onPpg(p)));
+      }
+      if (client.accelerometerData && onAccelerometer) {
+        subRef.current.push(client.accelerometerData.subscribe(a => onAccelerometer(a)));
+      }
+      if (client.gyroscopeData && onGyro) {
+        subRef.current.push(client.gyroscopeData.subscribe(g => onGyro(g)));
+      }
       updateChannelMaps(["TP9", "AF7", "AF8", "TP10", "AUXL", "AUXR"]);
       await client.start();
       setIsConnected(true);

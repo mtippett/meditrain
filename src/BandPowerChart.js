@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 
-function BandPowerChart({ channel, negative = false }) {
+function BandPowerChart({ channel, negative = false, targets = [], durationSec }) {
   const colorMap = useMemo(() => ({
     alpha: '#f97316',
     beta: '#06b6d4',
@@ -15,9 +15,13 @@ function BandPowerChart({ channel, negative = false }) {
 
   const svgRef = useRef(null);
   const [plotWidth, setPlotWidth] = useState(200);
+  const height = 140;
+  const margin = { top: 6, right: 8, bottom: 28, left: 36 };
+  const innerHeight = height - margin.top - margin.bottom;
 
   useEffect(() => {
-    if (!svgRef.current || bandPoints === 0) return;
+    if (!svgRef.current) return;
+    if (bandPoints === 0 && targets.length === 0) return;
 
     const measuredWidth = svgRef.current.parentElement?.clientWidth || 200;
     if (measuredWidth !== plotWidth) {
@@ -27,16 +31,38 @@ function BandPowerChart({ channel, negative = false }) {
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
-    const xScale = d3.scaleLinear().domain([0, bandPoints - 1]).range([0, measuredWidth]);
-    const yScale = d3.scaleLinear().domain([negative ? -1.0 : 0, 1.0]).range([100, 0]);
+    const innerWidth = measuredWidth - margin.left - margin.right;
+    const xScale = d3.scaleLinear()
+      .domain([0, Math.max(1, bandPoints - 1)])
+      .range([0, innerWidth]);
+    const yScale = d3.scaleLinear().domain([negative ? -1.0 : 0, 1.0]).range([innerHeight, 0]);
 
+    // Targets behind lines
+    const targetGroup = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+    targets.forEach((t) => {
+      const center = t.target;
+      const tol = t.tolerance || 0;
+      const y1 = yScale(Math.min(1, center + tol));
+      const y2 = yScale(Math.max(negative ? -1 : 0, center - tol));
+      targetGroup
+        .append('rect')
+        .attr('x', 0)
+        .attr('width', innerWidth)
+        .attr('y', y1)
+        .attr('height', Math.max(0, y2 - y1))
+        .attr('fill', colorMap[t.band] || '#fff')
+        .attr('opacity', 0.12);
+    });
+
+    // Lines
+    const lineGroup = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
     const line = d3
       .line()
       .x((d, i) => xScale(i))
       .y(d => yScale(d));
 
     bands.forEach((band) => {
-      svg
+      lineGroup
         .append('path')
         .datum(channel[band])
         .attr('fill', 'none')
@@ -45,17 +71,21 @@ function BandPowerChart({ channel, negative = false }) {
         .attr('d', line);
     });
 
-    svg
-      .append('g')
-      .attr('transform', `translate(0, ${100})`)
-      .call(d3.axisBottom(xScale).ticks(4).tickFormat(() => ''));
+    // Axes
+    const totalSeconds = durationSec || (bandPoints - 1);
+    svg.append('g')
+      .attr('transform', `translate(${margin.left}, ${margin.top + innerHeight})`)
+      .call(d3.axisBottom(xScale).ticks(4).tickFormat((d) => {
+        const remaining = Math.max(0, totalSeconds * (1 - d / Math.max(1, bandPoints - 1)));
+        return d >= bandPoints - 1 ? '0s' : `-${Math.round(remaining)}s`;
+      }));
 
-    svg
-      .append('g')
-      .call(d3.axisLeft(yScale).ticks(3));
-  }, [bandPoints, bands, channel, negative, colorMap, plotWidth]);
+    svg.append('g')
+      .attr('transform', `translate(${margin.left}, ${margin.top})`)
+      .call(d3.axisLeft(yScale).ticks(4).tickFormat(d3.format('.1f')));
+  }, [bandPoints, bands, channel, negative, colorMap, plotWidth, targets, innerHeight, margin.left, margin.right, margin.top]);
 
-  return <svg ref={svgRef} width="100%" height={100} />;
+  return <svg ref={svgRef} width="100%" height={height} />;
 }
 
 export default BandPowerChart;

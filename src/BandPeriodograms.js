@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useEffect, useState } from 'react';
 
-const maxFreq = 45;
+const maxFreq = 50;
 const minFreq = 0.5;
 const ROW_HEIGHT = 140;
 const BAND_MARKS = [
@@ -67,10 +67,15 @@ function BandPeriodograms({ eegData, selectedChannels }) {
       .map((f, i) => ({ f, m: mags[i] }))
       .filter(({ f }) => f >= minFreq && f <= maxFreq);
 
-    if (!points.length) return null;
+    // downsample bins to reduce DOM load
+    const maxBins = 256;
+    const step = Math.max(1, Math.floor(points.length / maxBins));
+    const sampled = points.filter((_, idx) => idx % step === 0);
+
+    if (!sampled.length) return null;
 
     const EPS = 1e-12;
-    const dbPoints = points.map(({ f, m }) => ({ f, db: 10 * Math.log10(Math.max(m, EPS)) }));
+    const dbPoints = sampled.map(({ f, m }) => ({ f, db: 10 * Math.log10(Math.max(m, EPS)) }));
     const maxDb = Math.max(...dbPoints.map(p => p.db));
     const minDbLocal = Math.min(...dbPoints.map(p => p.db));
     const minDb = Math.max(maxDb - 60, minDbLocal); // 60 dB window
