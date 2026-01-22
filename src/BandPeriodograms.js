@@ -1,5 +1,20 @@
 import React, { useMemo, useRef, useEffect, useState } from 'react';
 
+// Helper to find time gaps in a time series
+function splitByGaps(points, getTime, minGapMs = 2000) {
+  if (!points || points.length < 2) return [points];
+  const segments = [];
+  let lastIdx = 0;
+  for (let i = 1; i < points.length; ++i) {
+    if (getTime(points[i]) - getTime(points[i - 1]) > minGapMs) {
+      segments.push(points.slice(lastIdx, i));
+      lastIdx = i;
+    }
+  }
+  if (lastIdx < points.length) segments.push(points.slice(lastIdx));
+  return segments;
+}
+
 const maxFreq = 50;
 const minFreq = 0.5;
 const ROW_HEIGHT = 140;
@@ -64,7 +79,7 @@ function BandPeriodograms({ eegData, selectedChannels }) {
     const freqs = channel.averagedPeriodogram?.frequencies || [];
     const mags = channel.averagedPeriodogram?.magnitudes || [];
     const points = freqs
-      .map((f, i) => ({ f, m: mags[i] }))
+      .map((f, i) => ({ f, m: mags[i], t: channel.averagedPeriodogram?.timestamp ? channel.averagedPeriodogram.timestamp[i] : null }))
       .filter(({ f }) => f >= minFreq && f <= maxFreq);
 
     // downsample bins to reduce DOM load
@@ -75,13 +90,14 @@ function BandPeriodograms({ eegData, selectedChannels }) {
     if (!sampled.length) return null;
 
     const EPS = 1e-12;
-    const dbPoints = sampled.map(({ f, m }) => ({ f, db: 10 * Math.log10(Math.max(m, EPS)) }));
+    const dbPoints = sampled.map(({ f, m, t }) => ({ f, db: 10 * Math.log10(Math.max(m, EPS)), t }));
     const maxDb = Math.max(...dbPoints.map(p => p.db));
     const minDbLocal = Math.min(...dbPoints.map(p => p.db));
     const minDb = Math.max(maxDb - 60, minDbLocal); // 60 dB window
-    const bins = dbPoints.map(({ f, db }) => ({
+    const bins = dbPoints.map(({ f, db, t }) => ({
       x: (f / maxFreq) * plotWidth,
-      db
+      db,
+      t
     }));
     return { id: channel.label || channel.electrode, bins, maxDb, minDb };
   }).filter(Boolean);
@@ -94,6 +110,13 @@ function BandPeriodograms({ eegData, selectedChannels }) {
     <svg ref={svgRef} width="100%" height={height} className="periodogram-chart">
       {lineData.map((line, i) => {
         const binWidth = line.bins.length > 0 ? plotWidth / line.bins.length : 0;
+        // Find gaps in bins using t if available
+        let segments;
+        if (line.bins.length > 0 && line.bins[0].t != null) {
+          segments = splitByGaps(line.bins, b => b.t, 2000);
+        } else {
+          segments = [line.bins];
+        }
         return (
         <g key={line.id} transform={`translate(0, ${i * ROW_HEIGHT})`}>
           {/* Band guides */}
@@ -119,16 +142,20 @@ function BandPeriodograms({ eegData, selectedChannels }) {
             </g>
           ))}
 
-          {line.bins.map((bin, idxBin) => (
-            <rect
-              key={`${line.id}-${idxBin}`}
-              x={bin.x}
-              y={ROW_HEIGHT - ((bin.db - globalMinDb) / (globalMaxDb - globalMinDb + 1e-6)) * ROW_HEIGHT}
-              width={binWidth + 0.5}
-              height={((bin.db - globalMinDb) / (globalMaxDb - globalMinDb + 1e-6)) * ROW_HEIGHT}
-              fill={spectroColor((bin.db - globalMinDb) / (globalMaxDb - globalMinDb + 1e-6))}
-              stroke="none"
-            />
+          {segments.map((seg, segIdx) => (
+            <g key={`seg-${segIdx}`}>
+              {seg.map((bin, idxBin) => (
+                <rect
+                  key={`${line.id}-${segIdx}-${idxBin}`}
+                  x={bin.x}
+                  y={ROW_HEIGHT - ((bin.db - globalMinDb) / (globalMaxDb - globalMinDb + 1e-6)) * ROW_HEIGHT}
+                  width={binWidth + 0.5}
+                  height={((bin.db - globalMinDb) / (globalMaxDb - globalMinDb + 1e-6)) * ROW_HEIGHT}
+                  fill={spectroColor((bin.db - globalMinDb) / (globalMaxDb - globalMinDb + 1e-6))}
+                  stroke="none"
+                />
+              ))}
+            </g>
           ))}
           <text x={6} y={12} fill="rgba(255,255,255,0.7)" fontSize="11">
             {line.id}

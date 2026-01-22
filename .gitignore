@@ -21,3 +21,6 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+/notebooks/raw_data
+/notebooks/__pycache__

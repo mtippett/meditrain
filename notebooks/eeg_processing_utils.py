@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+
+def to_local_datetime_index(ts):
+    """Convert a pandas Series or DatetimeIndex to local timezone and return as DatetimeIndex."""
+    import tzlocal
+    local_tz = tzlocal.get_localzone()
+    ts = pd.to_datetime(ts)
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize('UTC')
+    return ts.dt.tz_convert(local_tz)
+
 import json
 import re
 import statistics
@@ -23,6 +33,17 @@ BANDS = [
     {"key": "beta", "label": "Beta", "min": 12, "max": 30},
     {"key": "gamma", "label": "Gamma", "min": 30, "max": 50},
 ]
+
+
+def _get_time_range_str(diag_df: pd.DataFrame) -> str | None:
+    if diag_df is None or "captured_at" not in diag_df.columns:
+        return None
+    captured_at = pd.to_datetime(diag_df["captured_at"], errors="coerce", utc=True)
+    if captured_at.notna().any():
+        min_ts = captured_at.min().strftime('%Y-%m-%d %H:%M:%S UTC')
+        max_ts = captured_at.max().strftime('%Y-%m-%d %H:%M:%S UTC')
+        return f"Data captured from {min_ts} to {max_ts}"
+    return None
 
 
 def notch_filter(samples: np.ndarray, f0: float = 60.0, fs: float = DEFAULT_FS, q: float = 30.0) -> np.ndarray:
@@ -267,6 +288,26 @@ def print_export_summary(diag_df: pd.DataFrame, raw_dir) -> None:
         print(f"Timestamps present (per-sample): {channels_with_full_timestamps}/{channels_seen} channels")
 
 
+def find_discontinuities(df: pd.DataFrame, sampling_rate: float, threshold_sec: float | None = None) -> pd.DataFrame:
+    if threshold_sec is None:
+        threshold_sec = 2.0 / sampling_rate
+    ts = df["timestamp"]
+    diffs = ts.diff()
+    gaps = diffs[diffs > pd.Timedelta(seconds=threshold_sec)]
+    
+    if gaps.empty:
+        return pd.DataFrame(columns=["start_ts", "end_ts", "gap_sec"])
+
+    gap_info = []
+    for idx, gap in gaps.items():
+        gap_info.append({
+            "start_ts": ts[idx - 1],
+            "end_ts": ts[idx],
+            "gap_sec": gap.total_seconds(),
+        })
+    return pd.DataFrame(gap_info)
+
+
 def load_label_timeseries(exports: list[dict], label: str) -> pd.DataFrame:
     frames = []
     for export in exports:
@@ -292,6 +333,14 @@ def load_label_timeseries(exports: list[dict], label: str) -> pd.DataFrame:
     out = pd.concat(frames, ignore_index=True)
     out = out.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     out = out.drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+
+    if not out.empty:
+        sampling_rate = out["sampling_rate_hz"].iloc[0]
+        discontinuities = find_discontinuities(out, sampling_rate)
+        if not discontinuities.empty:
+            print(f"WARNING: Discontinuities found in channel {label}:")
+            # print(discontinuities)
+
     out["t_sec"] = (out["timestamp"] - out["timestamp"].iloc[0]).dt.total_seconds()
     return out
 
@@ -328,6 +377,7 @@ def plot_raw_traces_per_label(
     max_points: int = 3000,
 ):
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
 
     if not exports:
         raise FileNotFoundError("No sample exports loaded")
@@ -343,14 +393,35 @@ def plot_raw_traces_per_label(
     if not non_empty:
         raise ValueError("No channel time series found to plot")
 
+
+    # Plot all available data for each channel
+    start_ts = min(df["timestamp"].min() for df in non_empty.values())
     end_ts = max(df["timestamp"].max() for df in non_empty.values())
-    start_ts = end_ts - pd.Timedelta(seconds=window_sec)
+
+    # Print the time window being plotted (in local time)
+    import tzlocal
+    local_tz = tzlocal.get_localzone()
+    start_ts_obj = pd.to_datetime(start_ts)
+    end_ts_obj = pd.to_datetime(end_ts)
+    if start_ts_obj.tzinfo is None:
+        start_ts_local = start_ts_obj.tz_localize('UTC').tz_convert(local_tz)
+    else:
+        start_ts_local = start_ts_obj.tz_convert(local_tz)
+    if end_ts_obj.tzinfo is None:
+        end_ts_local = end_ts_obj.tz_localize('UTC').tz_convert(local_tz)
+    else:
+        end_ts_local = end_ts_obj.tz_convert(local_tz)
+    print(f"Plotting window: {start_ts_local.strftime('%Y-%m-%d %H:%M:%S %Z')} to {end_ts_local.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     fig_h = max(2.2 * len(labels), 3)
     fig, axes = plt.subplots(len(labels), 1, figsize=(12, fig_h), sharex=True)
     if len(labels) == 1:
         axes = [axes]
 
+
+    import pytz
+    import tzlocal
+    local_tz = tzlocal.get_localzone()
     for ax, lbl in zip(axes, labels):
         df = series_by_label.get(lbl)
         if df is None or len(df) == 0:
@@ -369,18 +440,43 @@ def plot_raw_traces_per_label(
         stride = max(len(dfw) // max_points, 1)
         dfw = dfw.iloc[::stride]
 
-        t_sec = (dfw["timestamp"] - start_ts).dt.total_seconds().to_numpy()
+        # Convert timestamps to local time
+        ts = pd.to_datetime(dfw["timestamp"]).dt.tz_convert(local_tz)
+        ts = ts.reset_index(drop=True)
+        print(ts)
         y = dfw["sample"].to_numpy(dtype=float)
         y = y - y.mean()
-
-        ax.plot(t_sec, y, linewidth=0.8, color="#38bdf8")
+        if len(ts) < 2:
+            ax.plot(ts, y, linewidth=0.8, color="#38bdf8")
+        else:
+            # Find discontinuities (gaps > 2x median diff or > 2s if only one segment)
+            diffs = ts.diff().dt.total_seconds().fillna(0)
+            median_diff = diffs[diffs > 0].median() if (diffs > 0).any() else 0
+            gap_threshold = 2 * median_diff if median_diff > 0 else 2
+            gap_idx = diffs > gap_threshold
+            segment_starts = [0] + list((gap_idx[gap_idx].index).to_list())
+            segment_ends = list((gap_idx[gap_idx].index).to_list()) + [len(ts)]
+            for start, end in zip(segment_starts, segment_ends):
+                if end - start < 2:
+                    continue
+                ax.plot(ts[start:end], y[start:end], linewidth=0.8, color="#38bdf8")
         ax.set_ylabel(lbl)
         ax.grid(True, alpha=0.2)
 
-    axes[-1].set_xlabel("Time (s)")
+    axes[-1].set_xlabel("Clock Time")
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    fig.autofmt_xdate()
     fig.suptitle(f"Raw EEG traces per channel (last {window_sec}s)", y=1.02)
-    plt.tight_layout()
+    # Show local time range at the bottom
+    captured_at = pd.to_datetime(diag_df["captured_at"], errors="coerce", utc=True)
+    if captured_at.notna().any():
+        min_ts = captured_at.min().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
+        max_ts = captured_at.max().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
+        fig.text(0.5, 0.01, f"Data captured from {min_ts} to {max_ts}", ha='center', va='bottom', fontsize=8, color='gray')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
     plt.show()
+    plt.close(fig)
 
 
 def plot_spectrograms_per_label(
@@ -388,6 +484,12 @@ def plot_spectrograms_per_label(
     diag_df: pd.DataFrame | None = None,
     max_spectrogram_sec: int | None = None,
     max_freq_hz: int = 50,
+    nfft: int | None = 4096,
+    *,
+    nperseg: int | None = None,
+    noverlap: int | None = None,
+    per_channel_height: float = 2.8,
+    dpi: int = 140,
 ):
     import matplotlib.pyplot as plt
 
@@ -415,6 +517,7 @@ def plot_spectrograms_per_label(
         channel_rate = float(df["sampling_rate_hz"].mode().iloc[0]) if "sampling_rate_hz" in df else DEFAULT_FS
         samples = df["sample"].to_numpy(dtype=float)
 
+        # Plot all available data if max_spectrogram_sec is None
         if max_spectrogram_sec is not None:
             max_samples = int(max_spectrogram_sec * channel_rate)
             if len(samples) > max_samples:
@@ -422,12 +525,19 @@ def plot_spectrograms_per_label(
 
         samples = samples - samples.mean()
 
+        nperseg_effective = int(NPERSEG if nperseg is None else nperseg)
+        noverlap_effective = int(NOVERLAP if noverlap is None else noverlap)
+        nfft_effective = None
+        if nfft is not None:
+            nfft_effective = int(max(nfft, nperseg_effective))
+
         f, t, Sxx = signal.spectrogram(
             samples,
             fs=channel_rate,
             window="hann",
-            nperseg=NPERSEG,
-            noverlap=NOVERLAP,
+            nperseg=nperseg_effective,
+            noverlap=noverlap_effective,
+            nfft=nfft_effective,
             detrend=False,
             scaling="density",
         )
@@ -445,12 +555,16 @@ def plot_spectrograms_per_label(
     all_db = np.concatenate(all_db)
     vmin, vmax = np.percentile(all_db, [5, 95])
 
-    fig_h = max(2.6 * len(labels), 3.5)
-    fig, axes = plt.subplots(len(labels), 1, figsize=(12, fig_h), sharex=True)
+    fig_h = max(per_channel_height * len(labels), 3.5)
+    fig, axes = plt.subplots(len(labels), 1, figsize=(12, fig_h), sharex=True, dpi=dpi, constrained_layout=True)
     if len(labels) == 1:
         axes = [axes]
 
     pcm = None
+    import matplotlib.dates as mdates
+
+    import tzlocal
+    local_tz = tzlocal.get_localzone()
     for ax, lbl in zip(axes, labels):
         if lbl not in spec:
             ax.text(0.5, 0.5, f"{lbl}: no data", transform=ax.transAxes, ha="center", va="center")
@@ -459,37 +573,71 @@ def plot_spectrograms_per_label(
             continue
 
         f, t, Sxx_db = spec[lbl]
-        pcm = ax.pcolormesh(t, f, Sxx_db, shading="auto", cmap="turbo", vmin=vmin, vmax=vmax)
+        df = series_by_label.get(lbl)
+        if df is not None and len(df) > 0:
+            t0 = df["timestamp"].iloc[0]
+            t_clock = (pd.to_datetime(t0) + pd.to_timedelta(t, unit="s")).tz_convert(local_tz)
+            # Handle discontinuities: split t_clock into continuous segments
+            if len(t_clock) < 2:
+                pcm = ax.pcolormesh(t_clock, f, Sxx_db, shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
+            else:
+                diffs = pd.Series(t_clock).diff().dt.total_seconds().fillna(0)
+                median_diff = diffs[diffs > 0].median() if (diffs > 0).any() else 0
+                gap_idx = diffs > (2 * median_diff if median_diff > 0 else 2)
+                segment_starts = [0] + list((gap_idx[gap_idx].index).to_list())
+                segment_ends = list((gap_idx[gap_idx].index).to_list()) + [len(t_clock)]
+                for start, end in zip(segment_starts, segment_ends):
+                    if end - start < 2:
+                        continue
+                    pcm = ax.pcolormesh(t_clock[start:end], f, Sxx_db[:, start:end], shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        else:
+            pcm = ax.pcolormesh(t, f, Sxx_db, shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
         ax.set_ylabel(lbl)
         ax.set_ylim(0.5, max_freq_hz)
 
-    axes[-1].set_xlabel("Time (s)")
+    axes[-1].set_xlabel("Clock Time")
+    fig.autofmt_xdate()
     fig.suptitle("Spectrogram per channel (Welch/Hann)", y=0.99)
 
-    # Reserve space for a shared colorbar on the right.
-    fig.subplots_adjust(left=0.08, right=0.86, bottom=0.06, top=0.92, hspace=0.18)
     if pcm is not None:
-        cax = fig.add_axes([0.88, 0.12, 0.02, 0.76])
-        fig.colorbar(pcm, cax=cax, label="dB")
+        fig.colorbar(pcm, ax=axes, label="dB", shrink=0.6)
 
+    time_range_str = _get_time_range_str(diag_df)
+    if time_range_str:
+        fig.text(0.5, 0.01, time_range_str, ha='center', va='bottom', fontsize=8, color='gray')
     plt.show()
+    plt.close(fig)
 
 
 def compute_band_power_timeseries(samples: np.ndarray, fs: float, step_samples: int | None = None) -> pd.DataFrame:
     if step_samples is None:
         step_samples = NPERSEG // 2
     rows = []
+    # If samples is a pandas Series with datetime index, use it for timestamps
+    is_series = hasattr(samples, 'index') and hasattr(samples.index, 'values')
+    sample_index = samples.index if is_series else None
     for start in range(0, len(samples) - NPERSEG + 1, step_samples):
         seg = samples[start : start + NPERSEG]
         freqs_win, psd_win = compute_psd(seg, fs=fs)
         bands = band_powers(freqs_win, psd_win)
         t_mid = (start + (NPERSEG / 2)) / fs
-        row = {"t_sec": t_mid}
+        # UTC timestamp for the window center, from original index if available
+        timestamp_utc = None
+        if is_series and len(sample_index) > 0:
+            idx = int(start + (NPERSEG // 2))
+            if idx < len(sample_index):
+                timestamp_utc = sample_index[idx]
+        row = {"t_sec": t_mid, "timestamp": timestamp_utc}
         for key, value in bands.items():
             row[f"{key}_abs"] = value["absolute"]
             row[f"{key}_rel"] = value["relative"]
         rows.append(row)
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # If no timestamp column, leave as None; if t_sec and base timestamp available, reconstruct
+    if 'timestamp' in df.columns and df['timestamp'].isnull().all():
+        df = df.drop(columns=['timestamp'])
+    return df
 
 
 def _band_power_value_columns(relative: bool = True) -> list[str]:
@@ -523,8 +671,16 @@ def compute_band_power_timeseries_for_label(exports: list[dict], target_label: s
     if series is None or len(series) == 0:
         raise ValueError(f"No samples found for label={target_label}")
     fs = float(series["sampling_rate_hz"].mode().iloc[0]) if "sampling_rate_hz" in series else DEFAULT_FS
-    samples = series["sample"].to_numpy(dtype=float)
+    # Use pandas Series with datetime index for timestamp propagation
+    if "timestamp" in series.columns:
+        samples = pd.Series(series["sample"].to_numpy(dtype=float), index=series["timestamp"])
+    else:
+        samples = series["sample"].to_numpy(dtype=float)
     bp_ts = compute_band_power_timeseries(samples, fs)
+    # If timestamp column is missing, reconstruct from t_sec and base timestamp
+    if 'timestamp' not in bp_ts.columns and "timestamp" in series.columns and len(series) > 0:
+        base_ts = series["timestamp"].iloc[0]
+        bp_ts["timestamp"] = pd.to_datetime(base_ts) + pd.to_timedelta(bp_ts["t_sec"], unit="s")
     if bp_ts.empty:
         raise ValueError(f"Not enough samples to compute band power for label={target_label}")
     return bp_ts, fs
@@ -606,11 +762,35 @@ def plot_band_power_diagram(
     if ax is None:
         _, ax = plt.subplots(1, 1, figsize=(12, 4.6))
 
-    for i, band in enumerate(BANDS):
-        ax.plot(bp_plot["t_sec"], bp_plot[value_cols[i]], label=band["label"], linewidth=1.4, color=colors[i % len(colors)])
-
+    # Try to use clock time if available
+    import matplotlib.dates as mdates
+    # Use timestamp column if available, else fall back to t_sec
+    if "timestamp" in bp_plot.columns:
+        ts = to_local_datetime_index(bp_plot["timestamp"])
+        for i, band in enumerate(BANDS):
+            y = bp_plot[value_cols[i]].to_numpy(dtype=float)
+            if len(ts) < 2:
+                ax.plot(ts, y, linewidth=1.4, color=colors[i % len(colors)], label=band["label"])
+            else:
+                diffs = ts.to_series().diff().dt.total_seconds().fillna(0)
+                median_diff = diffs[diffs > 0].median() if (diffs > 0).any() else 0
+                gap_idx = diffs > (2 * median_diff if median_diff > 0 else 2)
+                segment_starts = [0] + list((gap_idx[gap_idx].index).to_list())
+                segment_ends = list((gap_idx[gap_idx].index).to_list()) + [len(ts)]
+                for start, end in zip(segment_starts, segment_ends):
+                    if end - start < 2:
+                        continue
+                    ax.plot(ts[start:end], y[start:end], linewidth=1.4, color=colors[i % len(colors)], label=band["label"] if start == 0 else None)
+        ax.set_xlabel("Local Date/Time")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+        import matplotlib.pyplot as plt
+        plt.gcf().autofmt_xdate()
+    else:
+        t_sec = bp_plot["t_sec"]
+        for i, band in enumerate(BANDS):
+            ax.plot(t_sec, bp_plot[value_cols[i]], label=band["label"], linewidth=1.4, color=colors[i % len(colors)])
+        ax.set_xlabel("Time (s)")
     ax.set_title(title + (f" (avg={avg_sec}s)" if (avg_sec is not None and avg_sec > 0) else ""))
-    ax.set_xlabel("Time (s)")
     ax.set_ylabel("Relative power" if relative else "Absolute power")
     ax.grid(True, alpha=0.25)
     return ax
@@ -652,8 +832,14 @@ def plot_band_power_diagrams(
     if len(groups) == 1:
         axes = [axes]
 
+    import tzlocal
+    local_tz = tzlocal.get_localzone()
     for ax, (name, group_labels) in zip(axes, groups):
         bp_ts, fs = compute_band_power_timeseries_combined(exports, group_labels)
+        # Print the time window being plotted (in local time)
+        if "timestamp" in bp_ts.columns and not bp_ts["timestamp"].empty:
+            ts_local = to_local_datetime_index(bp_ts["timestamp"])
+            print(f"Band power plot window for {name}: {ts_local.min().strftime('%Y-%m-%d %H:%M:%S %Z')} to {ts_local.max().strftime('%Y-%m-%d %H:%M:%S %Z')}")
         plot_band_power_diagram(
             bp_ts,
             title=f"Band power — {name}" + (" (relative)" if relative else " (absolute)"),
@@ -665,8 +851,16 @@ def plot_band_power_diagrams(
 
     handles, labels_legend = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels_legend, ncol=5, fontsize=9, loc="upper center", bbox_to_anchor=(0.5, 1.01))
-    plt.tight_layout()
+    # Show local time range at the bottom
+    captured_at = pd.to_datetime(diag_df["captured_at"], errors="coerce", utc=True)
+    if captured_at.notna().any():
+        min_ts = captured_at.min().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
+        max_ts = captured_at.max().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
+        fig.text(0.5, 0.01, f"Data captured from {min_ts} to {max_ts}", ha='center', va='bottom', fontsize=8, color='gray')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
     if show:
         plt.show()
+        plt.close(fig)
 
     return fig if return_fig else None

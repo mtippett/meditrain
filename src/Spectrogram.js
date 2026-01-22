@@ -140,6 +140,20 @@ function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
   const globalMinWindowed = Math.max(globalMaxDb - 60, globalMinDb);
   const globalRange = Math.max(1, globalMaxDb - globalMinWindowed);
 
+  // Helper to find time gaps in history
+  function findGaps(history, minGapMs = 2000) {
+    if (!history || history.length < 2) return [];
+    const gaps = [];
+    for (let i = 1; i < history.length; ++i) {
+      const prev = history[i - 1].timestamp;
+      const curr = history[i].timestamp;
+      if (curr - prev > minGapMs) {
+        gaps.push({ start: i - 1, end: i, gap: curr - prev });
+      }
+    }
+    return gaps;
+  }
+
   return (
     <svg ref={svgRef} width="100%" height={height} className="spectrogram">
       {labels.map((label, idx) => {
@@ -156,22 +170,49 @@ function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
           return spectroColor(t);
         };
 
+        // Find gaps in the history
+        const minGapMs = 2000; // 2 seconds, can be adjusted
+        const gaps = findGaps(history, minGapMs);
+
+        // Render segments between gaps
+        let lastIdx = 0;
+        const segments = [];
+        if (gaps.length === 0) {
+          segments.push({ start: 0, end: history.length });
+        } else {
+          gaps.forEach((gap, i) => {
+            segments.push({ start: lastIdx, end: gap.end });
+            lastIdx = gap.end;
+          });
+          if (lastIdx < history.length) {
+            segments.push({ start: lastIdx, end: history.length });
+          }
+        }
+
         return (
           <g key={label}>
-            {history.map((slice, xIdx) =>
-              slice.magnitudes.map((mag, yIdx) => (
-                <rect
-                  key={`${label}-${xIdx}-${yIdx}`}
-                  x={xIdx * sliceWidth}
-                  y={idx * rowHeight + rowHeight - (yIdx + 1) * binHeight}
-                  width={sliceWidth + 0.5}
-                  height={binHeight + 0.5}
-                  fill={colorForValue(dbSlices[xIdx][yIdx])}
-                  stroke="rgba(255,255,255,0.05)"
-                  strokeWidth="0.25"
-                />
-              ))
-            )}
+            {segments.map((seg, segIdx) => (
+              <g key={`seg-${segIdx}`}
+                opacity={1}
+              >
+                {Array.from({ length: seg.end - seg.start }).map((_, relIdx) => {
+                  const xIdx = seg.start + relIdx;
+                  const slice = history[xIdx];
+                  return slice.magnitudes.map((mag, yIdx) => (
+                    <rect
+                      key={`${label}-${xIdx}-${yIdx}`}
+                      x={xIdx * sliceWidth}
+                      y={idx * rowHeight + rowHeight - (yIdx + 1) * binHeight}
+                      width={sliceWidth + 0.5}
+                      height={binHeight + 0.5}
+                      fill={colorForValue(dbSlices[xIdx][yIdx])}
+                      stroke="rgba(255,255,255,0.05)"
+                      strokeWidth="0.25"
+                    />
+                  ));
+                })}
+              </g>
+            ))}
             {/* Band guides */}
             {[{ name: 'delta', f: 0.5 }, { name: 'theta', f: 4 }, { name: 'alpha', f: 8 }, { name: 'beta', f: 12 }, { name: 'gamma', f: 30 }].map((band, idxBand) => (
               <g key={band.name}>

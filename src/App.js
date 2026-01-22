@@ -252,42 +252,43 @@ function App() {
   // Simple audio white noise driven by distance from targets
   useEffect(() => {
     if (!audioEnabled || trainingTargets.length === 0) {
-      if (noiseRef.current) {
-        noiseRef.current.stop();
-        noiseRef.current.disconnect();
-        noiseRef.current = null;
-      }
-      if (gainRef.current) {
-        gainRef.current.disconnect();
-        gainRef.current = null;
-      }
-      if (audioCtxRef.current) {
-        audioCtxRef.current.close();
-        audioCtxRef.current = null;
-      }
       return;
     }
 
-    if (!audioCtxRef.current) {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtxRef.current = ctx;
-      const bufferSize = ctx.sampleRate * 2;
-      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        data[i] = Math.random() * 2 - 1;
-      }
-      const noise = ctx.createBufferSource();
-      noise.buffer = buffer;
-      noise.loop = true;
-      const gain = ctx.createGain();
-      gain.gain.value = 0;
-      noise.connect(gain).connect(ctx.destination);
-      noise.start();
-      gainRef.current = gain;
-      noiseRef.current = noise;
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const bufferSize = ctx.sampleRate * 2;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
     }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+    noise.loop = true;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    noise.connect(gain).connect(ctx.destination);
+    noise.start();
+    audioCtxRef.current = ctx;
+    gainRef.current = gain;
+    noiseRef.current = noise;
 
+    return () => {
+      noise.stop();
+      noise.disconnect();
+      gain.disconnect();
+      ctx.close();
+      audioCtxRef.current = null;
+      gainRef.current = null;
+      noiseRef.current = null;
+    };
+  }, [audioEnabled, trainingTargets.length]);
+
+  useEffect(() => {
+    if (!audioEnabled || !gainRef.current || trainingTargets.length === 0) {
+      if (gainRef.current) gainRef.current.gain.setTargetAtTime(0, audioCtxRef.current.currentTime, 0.05);
+      return;
+    }
     // compute max distance outside target ranges
     let maxDistance = 0;
     trainingTargets.forEach(target => {

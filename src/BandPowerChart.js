@@ -1,6 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 
+// Helper to find time gaps in a time series
+function splitByGaps(points, getTime, minGapMs = 2000) {
+  if (!points || points.length < 2) return [points];
+  const segments = [];
+  let lastIdx = 0;
+  for (let i = 1; i < points.length; ++i) {
+    if (getTime(points[i]) - getTime(points[i - 1]) > minGapMs) {
+      segments.push(points.slice(lastIdx, i));
+      lastIdx = i;
+    }
+  }
+  if (lastIdx < points.length) segments.push(points.slice(lastIdx));
+  return segments;
+}
+
 function BandPowerChart({ channel, negative = false, targets = [], durationSec }) {
   const colorMap = useMemo(() => ({
     alpha: '#f97316',
@@ -54,21 +69,32 @@ function BandPowerChart({ channel, negative = false, targets = [], durationSec }
         .attr('opacity', 0.12);
     });
 
-    // Lines
+    // Lines with gaps
     const lineGroup = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
     const line = d3
       .line()
-      .x((d, i) => xScale(i))
-      .y(d => yScale(d));
+      .x((d, i) => xScale(d._xIdx))
+      .y(d => yScale(d.v));
 
     bands.forEach((band) => {
-      lineGroup
-        .append('path')
-        .datum(channel[band])
-        .attr('fill', 'none')
-        .attr('stroke', colorMap[band] || '#fff')
-        .attr('stroke-width', 1.5)
-        .attr('d', line);
+      const points = (channel[band] || []).map((v, i) => ({ v, _xIdx: i, _t: v && v.t ? v.t : null }));
+      // If time info is available, use it to find gaps
+      let segments;
+      if (points.length > 0 && points[0]._t != null) {
+        segments = splitByGaps(points, p => p._t, 2000); // 2s gap
+      } else {
+        segments = [points];
+      }
+      segments.forEach(seg => {
+        if (seg.length < 2) return;
+        lineGroup
+          .append('path')
+          .datum(seg)
+          .attr('fill', 'none')
+          .attr('stroke', colorMap[band] || '#fff')
+          .attr('stroke-width', 1.5)
+          .attr('d', line);
+      });
     });
 
     // Axes
