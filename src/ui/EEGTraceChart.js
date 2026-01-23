@@ -31,7 +31,9 @@ function EEGTraceChart({ samples = [], height = 80, maxPoints = 800 }) {
 
     return {
       points,
-      width: reduced.length > 0 ? reduced[reduced.length - 1].x || 1 : 1
+      width: reduced.length > 0 ? reduced[reduced.length - 1].x || 1 : 1,
+      min: minY,
+      max: maxY
     };
   }, [samples, height, maxPoints]);
 
@@ -39,19 +41,31 @@ function EEGTraceChart({ samples = [], height = 80, maxPoints = 800 }) {
     return <p className="subdued">No samples yet.</p>;
   }
 
+  const marginLeft = 24;
+  const marginBottom = 14;
+  const innerWidth = Math.max(1, trace.width);
+  const innerHeight = Math.max(1, height - marginBottom);
+
   return (
     <svg
       width="100%"
       height={height}
-      viewBox={`0 0 ${trace.width} ${height}`}
+      viewBox={`0 0 ${innerWidth + marginLeft} ${height}`}
       preserveAspectRatio="none"
     >
-      <polyline
-        fill="none"
-        stroke="#4ade80"
-        strokeWidth="1.2"
-        points={trace.points}
-      />
+      <g transform={`translate(${marginLeft}, 0)`}>
+        <polyline
+          fill="none"
+          stroke="#4ade80"
+          strokeWidth="1.2"
+          points={trace.points}
+        />
+        <line x1="0" y1={innerHeight} x2={innerWidth} y2={innerHeight} stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
+      </g>
+      <line x1={marginLeft} y1="0" x2={marginLeft} y2={innerHeight} stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
+      <text x="2" y="10" fill="rgba(255,255,255,0.6)" fontSize="10">{trace.max.toFixed(1)}</text>
+      <text x="2" y={innerHeight - 2} fill="rgba(255,255,255,0.6)" fontSize="10">{trace.min.toFixed(1)}</text>
+      <text x={marginLeft} y={height - 2} fill="rgba(255,255,255,0.6)" fontSize="10">time</text>
     </svg>
   );
 }

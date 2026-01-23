@@ -119,6 +119,34 @@ function BandPeriodograms({ eegData, selectedChannels }) {
         }
         return (
         <g key={line.id} transform={`translate(0, ${i * ROW_HEIGHT})`}>
+          <line
+            x1="0"
+            y1="0"
+            x2="0"
+            y2={ROW_HEIGHT}
+            stroke="rgba(255,255,255,0.35)"
+            strokeWidth="1"
+          />
+          <line
+            x1="0"
+            y1={ROW_HEIGHT}
+            x2={plotWidth}
+            y2={ROW_HEIGHT}
+            stroke="rgba(255,255,255,0.35)"
+            strokeWidth="1"
+          />
+          <text x="4" y={ROW_HEIGHT - 4} fill="rgba(255,255,255,0.6)" fontSize="10">
+            {minFreq} Hz
+          </text>
+          <text x={plotWidth - 4} y={ROW_HEIGHT - 4} fill="rgba(255,255,255,0.6)" fontSize="10" textAnchor="end">
+            {maxFreq} Hz
+          </text>
+          <text x="4" y="12" fill="rgba(255,255,255,0.6)" fontSize="10">
+            {globalMaxDb.toFixed(0)} dB
+          </text>
+          <text x="4" y={ROW_HEIGHT - 16} fill="rgba(255,255,255,0.6)" fontSize="10">
+            {globalMinDb.toFixed(0)} dB
+          </text>
           {/* Band guides */}
           {BAND_MARKS.map((band) => (
             <g key={band.name}>

@@ -144,6 +144,7 @@
   width: auto;
   height: auto;
   overflow: auto;
+  background: var(--bg-contrast);
 }
 
 .panel p {
@@ -462,6 +463,67 @@ button:active {
 
 .inline-buttons .field {
   min-width: 180px;
+}
+
+.preset-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px;
+  background: var(--card-strong);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+
+.preset-selector .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 180px;
+}
+
+.preset-selector label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.preset-selector select {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: inherit;
+  font-size: 14px;
+}
+
+.preset-selector .clear-btn {
+  background: rgba(220, 53, 69, 0.15);
+  border: 1px solid rgba(220, 53, 69, 0.4);
+  color: #f87171;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.preset-selector .clear-btn:hover {
+  background: rgba(220, 53, 69, 0.25);
+}
+
+.preset-selector .preset-error {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: rgba(220, 53, 69, 0.15);
+  border: 1px solid rgba(220, 53, 69, 0.4);
+  border-radius: 6px;
+  color: #f87171;
+  font-size: 12px;
+  word-break: break-word;
 }
 
 .target-list {

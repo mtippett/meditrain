@@ -42,15 +42,16 @@ function MultiEEGTraceChart({ channels = [], windowSize = 4096, height = 220 }) 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
+    const marginLeft = 28;
     const marginBottom = 20;
     const innerHeight = height - marginBottom;
     const bandHeight = innerHeight / series.length;
     series.forEach((s, idx) => {
       const yOffset = idx * bandHeight;
-      const xScale = d3.scaleLinear().domain([0, s.samples.length]).range([0, plotWidth]);
+      const xScale = d3.scaleLinear().domain([0, s.samples.length]).range([0, plotWidth - marginLeft]);
       const yScale = d3.scaleLinear().domain([s.min, s.max]).range([bandHeight, 0]);
       const line = d3.line()
-        .x((d, i) => xScale(i))
+        .x((d, i) => marginLeft + xScale(i))
         .y(d => yOffset + yScale(d));
 
       svg.append('path')
@@ -73,7 +74,7 @@ function MultiEEGTraceChart({ channels = [], windowSize = 4096, height = 220 }) 
     const ticks = 4;
     for (let i = 0; i <= ticks; i++) {
       const t = i / ticks;
-      const x = t * plotWidth;
+      const x = marginLeft + t * (plotWidth - marginLeft);
       const label = `-${Math.round((1 - t) * durationSec)}s`;
       svg.append('text')
         .attr('x', x)
@@ -83,6 +84,22 @@ function MultiEEGTraceChart({ channels = [], windowSize = 4096, height = 220 }) 
         .attr('text-anchor', i === ticks ? 'end' : i === 0 ? 'start' : 'middle')
         .text(i === ticks ? '0s' : label);
     }
+
+    svg.append('line')
+      .attr('x1', marginLeft)
+      .attr('y1', 0)
+      .attr('x2', marginLeft)
+      .attr('y2', innerHeight)
+      .attr('stroke', 'rgba(255,255,255,0.35)')
+      .attr('stroke-width', 1);
+
+    svg.append('line')
+      .attr('x1', marginLeft)
+      .attr('y1', innerHeight)
+      .attr('x2', plotWidth)
+      .attr('y2', innerHeight)
+      .attr('stroke', 'rgba(255,255,255,0.35)')
+      .attr('stroke-width', 1);
   }, [series, height, plotWidth, windowSize, sampleRate]);
 
   if (series.length === 0) {

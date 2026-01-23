@@ -1,278 +1,242 @@
-import React, { useEffect, useMemo, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { fft, util as fftUtil } from 'fft-js';
+import { interpolateTurbo, rgb as d3Rgb } from 'd3';
 
-function lerp(a, b, t) {
-  return a + (b - a) * t;
+function hannWindow(N) {
+  const w = new Array(N);
+  for (let n = 0; n < N; n += 1) {
+    w[n] = 0.5 * (1 - Math.cos((2 * Math.PI * n) / (N - 1)));
+  }
+  return w;
 }
 
-function lerpColor([r1, g1, b1], [r2, g2, b2], t) {
-  return `rgb(${Math.round(lerp(r1, r2, t))}, ${Math.round(lerp(g1, g2, t))}, ${Math.round(lerp(b1, b2, t))})`;
+function nextPow2(value) {
+  let v = Math.max(1, Math.floor(value));
+  let p = 1;
+  while (p < v) p *= 2;
+  return p;
 }
 
-// Classic spectrogram palette: deep blue -> cyan -> yellow -> red
-function spectroColor(t) {
-  const stops = [
-    [10, 20, 80],
-    [30, 120, 200],
-    [80, 200, 255],
-    [255, 230, 80],
-    [255, 120, 40],
-    [200, 20, 20]
-  ];
-  const clamped = Math.max(0, Math.min(1, t));
-  const seg = clamped * (stops.length - 1);
-  const i = Math.floor(seg);
-  const frac = seg - i;
-  if (i >= stops.length - 1) return `rgb(${stops[stops.length - 1].join(',')})`;
-  return lerpColor(stops[i], stops[i + 1], frac);
+function computeSpectrogram(samples, fs, nperseg, noverlap, nfft, maxFreq) {
+  if (!samples || samples.length < nperseg) return null;
+  const step = Math.max(1, nperseg - noverlap);
+  const window = hannWindow(nperseg);
+  const windowPower = window.reduce((s, v) => s + v * v, 0) / nperseg;
+  const times = [];
+  const slices = [];
+  let freqOut = null;
+
+  for (let start = 0; start + nperseg <= samples.length; start += step) {
+    const segment = samples.slice(start, start + nperseg);
+    const padded = new Array(nfft).fill(0);
+    for (let i = 0; i < nperseg; i += 1) {
+      padded[i] = segment[i] * window[i];
+    }
+    const phasors = fft(padded);
+    const freqs = fftUtil.fftFreq(phasors, fs);
+    const mags = fftUtil.fftMag(phasors);
+
+    const psd = [];
+    const freqsFiltered = [];
+    const nyquistIdx = Math.floor(nfft / 2);
+    for (let i = 0; i < freqs.length; i += 1) {
+      if (freqs[i] < 0) continue;
+      if (freqs[i] > maxFreq) continue;
+      const power = (mags[i] * mags[i]) / (fs * nperseg * windowPower);
+      const scale = (i === 0 || i === nyquistIdx) ? 1 : 2;
+      psd.push(power * scale);
+      freqsFiltered.push(freqs[i]);
+    }
+    if (!freqOut) {
+      freqOut = freqsFiltered;
+    }
+    const tMid = (start + nperseg / 2) / fs;
+    times.push(tMid);
+    slices.push(psd);
+  }
+  if (!slices.length || !freqOut || !freqOut.length) return null;
+  return { freqs: freqOut, times, slices };
+}
+
+function percentile(values, p) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.round((p / 100) * (sorted.length - 1))));
+  return sorted[idx];
 }
 
 function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
-  const [histories, setHistories] = useState({});
-  const [channelPeaks, setChannelPeaks] = useState({});
-  const maxFreq = 50; // focus on meditation-relevant bands and align with periodograms
-  const svgRef = useRef(null);
+  const maxFreq = 50; // align with notebook spectrogram range
+  const sampleRate = 256;
+  const maxSamples = Math.round(windowSeconds * sampleRate);
+  const nperseg = Math.max(256, Math.min(2048, maxSamples));
+  const timeStep = Math.max(32, Math.floor(nperseg / 16));
+  const noverlap = Math.max(0, nperseg - timeStep);
+  const nfft = Math.max(8192, nextPow2(nperseg * 4));
+  const canvasRef = useRef(null);
   const [plotWidth, setPlotWidth] = useState(500);
-  const lastSignatureRef = useRef({});
 
   const channelsWithSpectra = useMemo(() => {
     const targets = selectedChannels.length ? selectedChannels : eegData.map(c => c.label || c.electrode);
     return eegData
       .filter((c) => targets.includes(c.label || c.electrode))
-      .filter((c) => c.averagedPeriodogram);
-  }, [eegData, selectedChannels]);
+      .filter((c) => c.samples && c.samples.length >= nperseg);
+  }, [eegData, selectedChannels, nperseg]);
 
   useEffect(() => {
-    if (!svgRef.current) return;
-    const measuredWidth = svgRef.current.parentElement?.clientWidth || plotWidth;
+    if (!canvasRef.current) return;
+    const measuredWidth = canvasRef.current.parentElement?.clientWidth || plotWidth;
     if (measuredWidth !== plotWidth) {
       setPlotWidth(measuredWidth);
     }
   }, [plotWidth]);
 
+  const spectrograms = useMemo(() => {
+    if (!channelsWithSpectra.length) return [];
+    return channelsWithSpectra.map((channel) => {
+      const label = channel.label || channel.electrode;
+      const samples = channel.samples || [];
+      const clipped = maxSamples > 0 ? samples.slice(-maxSamples) : samples.slice();
+      if (clipped.length < nperseg) return null;
+      const mean = clipped.reduce((s, v) => s + v, 0) / clipped.length;
+      const centered = clipped.map(v => v - mean);
+      const spec = computeSpectrogram(centered, sampleRate, nperseg, noverlap, nfft, maxFreq);
+      if (!spec) return null;
+      const EPS = 1e-12;
+      const dbSlices = spec.slices.map(slice => slice.map(v => 10 * Math.log10(Math.max(v, EPS))));
+      return { label, freqs: spec.freqs, times: spec.times, dbSlices };
+    }).filter(Boolean);
+  }, [channelsWithSpectra, maxFreq, nfft, noverlap, nperseg, sampleRate, windowSeconds]);
+
+  const labels = spectrograms.map(s => s.label);
+  const rowHeight = 180;
+  const axisHeight = 20;
+  const height = Math.max(axisHeight, labels.length * rowHeight + axisHeight);
+
+  const allDbValues = spectrograms.flatMap(spec => spec.dbSlices.flat());
+  let vmin = percentile(allDbValues, 5);
+  let vmax = percentile(allDbValues, 95);
+  if (!isFinite(vmin) || !isFinite(vmax) || vmin === vmax) {
+    vmin = -120;
+    vmax = -40;
+  }
+
+  const palette = useMemo(() => {
+    const colors = [];
+    for (let i = 0; i < 256; i += 1) {
+      const c = d3Rgb(interpolateTurbo(i / 255));
+      colors.push([c.r, c.g, c.b]);
+    }
+    return colors;
+  }, []);
+
   useEffect(() => {
-    if (channelsWithSpectra.length === 0) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-    const windowMs = windowSeconds * 1000;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(plotWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(height * dpr));
+    canvas.style.width = `${plotWidth}px`;
+    canvas.style.height = `${height}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, plotWidth, height);
 
-    setHistories((prev) => {
-      const next = { ...prev };
-      const labels = new Set();
+    spectrograms.forEach((spec, idx) => {
+      const { label, dbSlices } = spec;
+      if (!dbSlices || dbSlices.length === 0) return;
 
-      channelsWithSpectra.forEach((channel) => {
-        const label = channel.label || channel.electrode;
-        labels.add(label);
-        const freqRef = channel.averagedPeriodogram.frequencies;
-        const indices = freqRef
-          .map((f, idx) => ({ f, idx }))
-          .filter(({ f }) => f <= maxFreq);
+      const slicesCount = dbSlices.length;
+      const freqBins = dbSlices[0].length || 1;
+      const offscreen = document.createElement('canvas');
+      offscreen.width = slicesCount;
+      offscreen.height = freqBins;
+      const offCtx = offscreen.getContext('2d');
+      if (!offCtx) return;
+      const image = offCtx.createImageData(slicesCount, freqBins);
+      const data = image.data;
 
-        const magnitudes = indices.map(({ idx }) => channel.averagedPeriodogram.magnitudes[idx]);
-        const freqs = indices.map(({ f }) => f);
-        const slice = { freqs, magnitudes, timestamp: Date.now() };
-
-        // Skip if data is unchanged to avoid flat updates
-        const signature = magnitudes.reduce((sum, v) => sum + v, 0);
-        const lastSig = lastSignatureRef.current[label];
-        if (lastSig && lastSig.len === magnitudes.length && Math.abs(lastSig.sig - signature) < 1e-9) {
-          return;
+      for (let x = 0; x < slicesCount; x += 1) {
+        const slice = dbSlices[x];
+        for (let y = 0; y < freqBins; y += 1) {
+          const vDb = slice[y];
+          const t = Math.max(0, Math.min(1, (vDb - vmin) / (vmax - vmin)));
+          const c = palette[Math.min(255, Math.max(0, Math.round(t * 255)))];
+          const yFlip = freqBins - 1 - y;
+          const idxPix = (yFlip * slicesCount + x) * 4;
+          data[idxPix] = c[0];
+          data[idxPix + 1] = c[1];
+          data[idxPix + 2] = c[2];
+          data[idxPix + 3] = 255;
         }
-        lastSignatureRef.current[label] = { len: magnitudes.length, sig: signature };
+      }
+      offCtx.putImageData(image, 0, 0);
 
-        const existing = next[label] || [];
-        const updated = [...existing, slice];
-        // prune by time window rather than count only
-        while (updated.length && (slice.timestamp - updated[0].timestamp) > windowMs) {
-          updated.shift();
-        }
-        next[label] = updated;
+      const rowTop = idx * rowHeight;
+      ctx.drawImage(offscreen, 0, rowTop, plotWidth, rowHeight);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, rowTop);
+      ctx.lineTo(0, rowTop + rowHeight);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, rowTop + rowHeight);
+      ctx.lineTo(plotWidth, rowTop + rowHeight);
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.setLineDash([4, 4]);
+      [{ name: 'delta', f: 0.5 }, { name: 'theta', f: 4 }, { name: 'alpha', f: 8 }, { name: 'beta', f: 12 }, { name: 'gamma', f: 30 }].forEach((band) => {
+        const y = rowTop + rowHeight - (band.f / maxFreq) * rowHeight;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(plotWidth, y);
+        ctx.stroke();
       });
+      ctx.setLineDash([]);
 
-      // prune removed channels
-      Object.keys(next).forEach((label) => {
-        if (!labels.has(label)) delete next[label];
-      });
-
-      return next;
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.font = '12px sans-serif';
+      ctx.fillText(label, 8, rowTop + 16);
+      ctx.fillText(`${maxFreq} Hz`, 8, rowTop + 30);
+      ctx.fillText('0 Hz', 8, rowTop + rowHeight - 6);
     });
 
-    // track peak per channel for consistent scaling
-    setChannelPeaks((prev) => {
-      const next = { ...prev };
-      channelsWithSpectra.forEach((channel) => {
-        const label = channel.label || channel.electrode;
-        const localMax = Math.max(...channel.averagedPeriodogram.magnitudes);
-        next[label] = Math.max(next[label] || 0, localMax);
-      });
-      // prune
-      Object.keys(next).forEach((label) => {
-        if (!channelsWithSpectra.find(c => (c.label || c.electrode) === label)) delete next[label];
-      });
-      return next;
-    });
-  }, [channelsWithSpectra, windowSeconds, maxFreq]);
+    if (labels.length > 0 && spectrograms[0]?.dbSlices?.length > 1) {
+      const durationSec = Math.max(1, Math.round(windowSeconds));
+      const ticks = 4;
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.font = '10px sans-serif';
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(0, height - axisHeight);
+      ctx.lineTo(plotWidth, height - axisHeight);
+      ctx.stroke();
+      for (let i = 0; i <= ticks; i += 1) {
+        const t = i / ticks;
+        const x = t * plotWidth;
+        const label = i === ticks ? '0s' : `-${Math.round((1 - t) * durationSec)}s`;
+        const textWidth = ctx.measureText(label).width;
+        let textX = x;
+        if (i === ticks) textX = x - textWidth;
+        if (i === 0) textX = x;
+        if (i > 0 && i < ticks) textX = x - textWidth / 2;
+        ctx.fillText(label, textX, height - 4);
+      }
+    }
+  }, [height, labels, palette, plotWidth, spectrograms, vmax, vmin, windowSeconds, maxFreq]);
 
-  const labels = Object.keys(histories);
   if (labels.length === 0) {
     return <p className="subdued">Waiting for per-channel spectrograms.</p>;
   }
 
-  const rowHeight = 180;
-  const axisHeight = 20;
-  const height = labels.length * rowHeight + axisHeight;
-
-  // precompute global dB range for consistent scale
-  let globalMaxDb = -Infinity;
-  let globalMinDb = Infinity;
-  const channelDbSlices = {};
-  labels.forEach(label => {
-    const history = histories[label];
-    if (!history || history.length === 0) return;
-    const EPS = 1e-12;
-    const dbSlices = history.map(slice => slice.magnitudes.map(m => 10 * Math.log10(Math.max(m, EPS))));
-    channelDbSlices[label] = dbSlices;
-    dbSlices.flat().forEach(v => {
-      if (v > globalMaxDb) globalMaxDb = v;
-      if (v < globalMinDb) globalMinDb = v;
-    });
-  });
-  if (!isFinite(globalMaxDb)) globalMaxDb = -60;
-  if (!isFinite(globalMinDb)) globalMinDb = -120;
-  const globalMinWindowed = Math.max(globalMaxDb - 60, globalMinDb);
-  const globalRange = Math.max(1, globalMaxDb - globalMinWindowed);
-
-  // Helper to find time gaps in history
-  function findGaps(history, minGapMs = 2000) {
-    if (!history || history.length < 2) return [];
-    const gaps = [];
-    for (let i = 1; i < history.length; ++i) {
-      const prev = history[i - 1].timestamp;
-      const curr = history[i].timestamp;
-      if (curr - prev > minGapMs) {
-        gaps.push({ start: i - 1, end: i, gap: curr - prev });
-      }
-    }
-    return gaps;
-  }
-
   return (
-    <svg ref={svgRef} width="100%" height={height} className="spectrogram">
-      {labels.map((label, idx) => {
-        const history = histories[label];
-        if (!history || history.length === 0) return null;
-
-        const sliceWidth = plotWidth / history.length;
-        const freqBins = history[0].freqs.length || 1;
-        const binHeight = rowHeight / freqBins;
-        const dbSlices = channelDbSlices[label] || [];
-
-        const colorForValue = (vDb) => {
-          const t = (Math.max(vDb, globalMinWindowed) - globalMinWindowed) / globalRange;
-          return spectroColor(t);
-        };
-
-        // Find gaps in the history
-        const minGapMs = 2000; // 2 seconds, can be adjusted
-        const gaps = findGaps(history, minGapMs);
-
-        // Render segments between gaps
-        let lastIdx = 0;
-        const segments = [];
-        if (gaps.length === 0) {
-          segments.push({ start: 0, end: history.length });
-        } else {
-          gaps.forEach((gap, i) => {
-            segments.push({ start: lastIdx, end: gap.end });
-            lastIdx = gap.end;
-          });
-          if (lastIdx < history.length) {
-            segments.push({ start: lastIdx, end: history.length });
-          }
-        }
-
-        return (
-          <g key={label}>
-            {segments.map((seg, segIdx) => (
-              <g key={`seg-${segIdx}`}
-                opacity={1}
-              >
-                {Array.from({ length: seg.end - seg.start }).map((_, relIdx) => {
-                  const xIdx = seg.start + relIdx;
-                  const slice = history[xIdx];
-                  return slice.magnitudes.map((mag, yIdx) => (
-                    <rect
-                      key={`${label}-${xIdx}-${yIdx}`}
-                      x={xIdx * sliceWidth}
-                      y={idx * rowHeight + rowHeight - (yIdx + 1) * binHeight}
-                      width={sliceWidth + 0.5}
-                      height={binHeight + 0.5}
-                      fill={colorForValue(dbSlices[xIdx][yIdx])}
-                      stroke="rgba(255,255,255,0.05)"
-                      strokeWidth="0.25"
-                    />
-                  ));
-                })}
-              </g>
-            ))}
-            {/* Band guides */}
-            {[{ name: 'delta', f: 0.5 }, { name: 'theta', f: 4 }, { name: 'alpha', f: 8 }, { name: 'beta', f: 12 }, { name: 'gamma', f: 30 }].map((band, idxBand) => (
-              <g key={band.name}>
-                <line
-                  x1={(band.f / maxFreq) * plotWidth}
-                  x2={(band.f / maxFreq) * plotWidth}
-                  y1={idx * rowHeight}
-                  y2={idx * rowHeight + rowHeight}
-                  stroke="rgba(255,255,255,0.12)"
-                  strokeDasharray="4 4"
-                  strokeWidth="1"
-                />
-                {idxBand === 0 && (
-                  <text
-                    x={(band.f / maxFreq) * plotWidth + 4}
-                    y={idx * rowHeight + 12}
-                    fill="rgba(255,255,255,0.6)"
-                    fontSize="10"
-                  >
-                    {band.name}
-                  </text>
-                )}
-              </g>
-            ))}
-            <text x={8} y={idx * rowHeight + 16} fill="rgba(255,255,255,0.8)" fontSize="12">
-              {label}
-            </text>
-            <text x={8} y={idx * rowHeight + rowHeight - 6} fill="rgba(255,255,255,0.8)" fontSize="12">
-              {maxFreq} Hz
-            </text>
-          </g>
-        );
-      })}
-      {/* simple time scale */}
-      {labels.length > 0 && histories[labels[0]]?.length > 1 && (
-        (() => {
-          const durationSec = Math.max(1, Math.round(windowSeconds));
-          const ticks = 4;
-          const texts = [];
-          for (let i = 0; i <= ticks; i++) {
-            const t = i / ticks;
-            const x = t * plotWidth;
-            const label = i === ticks ? '0s' : `-${Math.round((1 - t) * durationSec)}s`;
-            texts.push(
-              <text
-                key={`axis-${i}`}
-                x={x}
-                y={height - 4}
-                fill="rgba(255,255,255,0.6)"
-                fontSize="10"
-                textAnchor={i === ticks ? 'end' : i === 0 ? 'start' : 'middle'}
-              >
-                {label}
-              </text>
-            );
-          }
-          return texts;
-        })()
-      )}
-    </svg>
+    <canvas ref={canvasRef} className="spectrogram" />
   );
 }
 

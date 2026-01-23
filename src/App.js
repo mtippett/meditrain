@@ -8,6 +8,7 @@ import BandPeriodograms from './BandPeriodograms';
 
 import './App.css';
 import { STANDARD_BANDS } from './constants/bands';
+import localBandTargets from './band_targets.json';
 
 function App() {
   const [eegData, setEEGData] = useState([]);
@@ -20,15 +21,63 @@ function App() {
   const [bandSmoothingSec, setBandSmoothingSec] = useState(10);
   const [deltaSmoothingSec, setDeltaSmoothingSec] = useState(10);
   const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioSensitivity, setAudioSensitivity] = useState(1);
+  const [audioSensitivityHistory, setAudioSensitivityHistory] = useState([]);
   const [lastFFT, setLastFFT] = useState(null);
   const audioCtxRef = useRef(null);
   const gainRef = useRef(null);
   const noiseRef = useRef(null);
+  const audioSensitivityRef = useRef({ value: 1, lastUpdate: Date.now() });
   const lastBandSigRef = useRef({});
-  const [showBandPower, setShowBandPower] = useState(true);
-  const [showPeriodograms, setShowPeriodograms] = useState(true);
-  const [showSpectrogram, setShowSpectrogram] = useState(true);
+  const [showBandPower, setShowBandPower] = useState(false);
+  const [showPeriodograms, setShowPeriodograms] = useState(false);
+  const [showSpectrogram, setShowSpectrogram] = useState(false);
   const [fullscreenPanel, setFullscreenPanel] = useState(null);
+  const [bandTargetPresets, setBandTargetPresets] = useState({ profiles: [] });
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  const [presetsError, setPresetsError] = useState(null);
+
+  // Load band target presets from JSON
+  useEffect(() => {
+    setPresetsLoading(true);
+    setPresetsError(null);
+    // Use PUBLIC_URL to handle apps deployed to subdirectories (e.g., /meditrain)
+    const url = `${process.env.PUBLIC_URL}/band_targets.json`;
+    fetch(url)
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+        // Check content-type to ensure we got JSON, not HTML fallback
+        const contentType = res.headers.get('content-type');
+        if (contentType && contentType.includes('text/html')) {
+          throw new Error('Expected JSON but got HTML (likely base path or SPA fallback)');
+        }
+        return res.json();
+      })
+      .then(data => {
+        if (!data.profiles || !Array.isArray(data.profiles)) {
+          throw new Error('Invalid JSON: missing profiles array');
+        }
+        setBandTargetPresets(data);
+        setPresetsLoading(false);
+      })
+      .catch(err => {
+        console.error('Failed to load band_targets.json:', err);
+        // Fall back to bundled presets from src/band_targets.json so the UI still works.
+        try {
+          if (!localBandTargets.profiles || !Array.isArray(localBandTargets.profiles)) {
+            throw new Error('Invalid localBandTargets: missing profiles array');
+          }
+          setBandTargetPresets(localBandTargets);
+          setPresetsError((err && err.message ? err.message : 'Unknown error') + ' (using bundled presets)');
+        } catch (fallbackErr) {
+          setPresetsError((err && err.message ? err.message : 'Unknown error') + ' (fallback failed)');
+        } finally {
+          setPresetsLoading(false);
+        }
+      });
+  }, []);
 
 
   function onPeriodgramUpdated(updatedEEGData) {
@@ -249,11 +298,60 @@ function App() {
     setTrainingTargets(prev => prev.filter(t => t.id !== id));
   }
 
+  // Apply a preset profile from band_targets.json
+  function applyPreset(profileName) {
+    const profile = bandTargetPresets.profiles?.find(p => p.name === profileName);
+    if (!profile) return;
+
+    // Clear existing targets and build new ones from the preset
+    const newTargets = [];
+    profile.targets.forEach(targetGroup => {
+      // Map electrodes to label format used by TrainingControl
+      const electrodes = targetGroup.electrodes || [];
+      let label;
+      if (electrodes.length === 2) {
+        // Check for known pairs
+        if (electrodes.includes('TP9') && electrodes.includes('TP10')) {
+          label = 'PAIR_TP9_10';
+        } else if (electrodes.includes('AF7') && electrodes.includes('AF8')) {
+          label = 'PAIR_AF7_8';
+        } else {
+          // Use first electrode if pair not recognized
+          label = electrodes[0];
+        }
+      } else if (electrodes.length === 1) {
+        label = electrodes[0];
+      } else {
+        label = 'ALL';
+      }
+
+      // Create a target for each band in this electrode group
+      Object.entries(targetGroup.bands).forEach(([band, config]) => {
+        newTargets.push({
+          id: `preset-${profileName}-${label}-${band}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+          label,
+          band,
+          target: config.target,
+          tolerance: config.tolerance
+        });
+      });
+    });
+
+    setTrainingTargets(newTargets);
+  }
+
+  function clearAllTargets() {
+    setTrainingTargets([]);
+  }
+
   // Simple audio white noise driven by distance from targets
   useEffect(() => {
     if (!audioEnabled || trainingTargets.length === 0) {
       return;
     }
+    audioSensitivityRef.current = { value: 1, lastUpdate: Date.now() };
+    setAudioSensitivity(1);
+    setAudioSensitivityHistory([{ t: Date.now(), v: 1 }]);
 
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const bufferSize = ctx.sampleRate * 2;
@@ -285,22 +383,65 @@ function App() {
   }, [audioEnabled, trainingTargets.length]);
 
   useEffect(() => {
+    if (!audioEnabled || trainingTargets.length === 0) return;
+    audioSensitivityRef.current = { value: 1, lastUpdate: Date.now() };
+    setAudioSensitivity(1);
+    setAudioSensitivityHistory([{ t: Date.now(), v: 1 }]);
+  }, [audioEnabled, trainingTargets]);
+
+  useEffect(() => {
+    if (!audioEnabled || trainingTargets.length === 0) {
+      return;
+    }
+    const intervalId = setInterval(() => {
+      const value = audioSensitivityRef.current?.value ?? 1;
+      const now = Date.now();
+      setAudioSensitivityHistory((prev) => {
+        const next = [...prev, { t: now, v: value }];
+        const cutoff = now - 5 * 60 * 1000;
+        while (next.length > 2 && next[0].t < cutoff) {
+          next.shift();
+        }
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(intervalId);
+  }, [audioEnabled, trainingTargets.length]);
+
+  useEffect(() => {
     if (!audioEnabled || !gainRef.current || trainingTargets.length === 0) {
       if (gainRef.current) gainRef.current.gain.setTargetAtTime(0, audioCtxRef.current.currentTime, 0.05);
       return;
     }
     // compute max distance outside target ranges
     let maxDistance = 0;
+    let allMatched = true;
     trainingTargets.forEach(target => {
       const snapshot = bandSnapshots.find(s => s.label === target.label);
       const current = snapshot?.bands?.[target.band]?.relative;
-      if (typeof current !== 'number') return;
+      if (typeof current !== 'number') {
+        allMatched = false;
+        return;
+      }
       const diff = Math.abs(current - target.target);
       const over = Math.max(0, diff - target.tolerance);
       if (over > maxDistance) maxDistance = over;
+      if (over > 0) {
+        allMatched = false;
+      }
     });
 
-    const norm = Math.max(0, Math.min(1, maxDistance * 5)); // scale sensitivity
+    const now = Date.now();
+    const sensitivityState = audioSensitivityRef.current;
+    const elapsedSec = Math.max(0, (now - sensitivityState.lastUpdate) / 1000);
+    const baseDecayPerSec = 0.003;
+    const matchedDecayPerSec = 0.01;
+    const decay = (allMatched ? matchedDecayPerSec : baseDecayPerSec) * elapsedSec;
+    const nextSensitivity = Math.max(0.2, sensitivityState.value - decay);
+    audioSensitivityRef.current = { value: nextSensitivity, lastUpdate: now };
+    setAudioSensitivity(nextSensitivity);
+
+    const norm = Math.max(0, Math.min(1, maxDistance * 5 * nextSensitivity)); // time-dependent sensitivity
     if (gainRef.current) {
       gainRef.current.gain.setTargetAtTime(norm * 0.2, audioCtxRef.current.currentTime, 0.05);
     }
@@ -392,7 +533,14 @@ function App() {
             onSaveTarget={upsertTarget}
             onDeleteTarget={deleteTarget}
             audioEnabled={audioEnabled}
+            audioSensitivity={audioSensitivity}
+            audioSensitivityHistory={audioSensitivityHistory}
             onToggleAudio={setAudioEnabled}
+            presets={bandTargetPresets.profiles || []}
+            presetsLoading={presetsLoading}
+            presetsError={presetsError}
+            onApplyPreset={applyPreset}
+            onClearTargets={clearAllTargets}
           />
           <TrainingView />
         </section>

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { MuseClient } from 'muse-js';
 
 /**
@@ -7,7 +7,10 @@ import { MuseClient } from 'muse-js';
  * - Cleans up subscriptions/listeners on disconnect or errors.
  * - Surfaces status and allows manual reconnects.
  */
-function MuseData({ onNewData, updateChannelMaps, onTelemetry, onPpg, onAccelerometer, onGyro }) {
+const MuseData = React.forwardRef(function MuseData(
+  { onNewData, updateChannelMaps, onTelemetry, onPpg, onAccelerometer, onGyro, onStatusChange },
+  ref
+) {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState(null);
@@ -37,6 +40,7 @@ function MuseData({ onNewData, updateChannelMaps, onTelemetry, onPpg, onAccelero
   }
 
   async function connect() {
+    if (isConnecting) return;
     setIsConnecting(true);
     setError(null);
 
@@ -97,6 +101,23 @@ function MuseData({ onNewData, updateChannelMaps, onTelemetry, onPpg, onAccelero
     setError('Disconnected');
   }
 
+  useEffect(() => {
+    if (onStatusChange) {
+      onStatusChange({ isConnected, isConnecting, error });
+    }
+  }, [isConnected, isConnecting, error, onStatusChange]);
+
+  useImperativeHandle(ref, () => ({
+    reconnect: async () => {
+      if (isConnecting) return;
+      await safeDisconnect();
+      await connect();
+    },
+    disconnect: async () => {
+      await onManualDisconnect();
+    }
+  }));
+
   return (
     <div>
       {!isConnected && !isConnecting && <button onClick={connect}>Connect to Muse</button>}
@@ -111,6 +132,6 @@ function MuseData({ onNewData, updateChannelMaps, onTelemetry, onPpg, onAccelero
       {isConnected && error && <p className="subdued">Status: {error}</p>}
     </div>
   );
-}
+});
 
 export default MuseData;

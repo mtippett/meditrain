@@ -142,11 +142,115 @@ def channel_timebase(channel: dict, capture_start: pd.Timestamp | None, sampling
 
 def list_sample_files(raw_dir: Path | str, pattern: str = "samples_*.json") -> list[Path]:
     raw_dir = Path(raw_dir)
+    if not pattern:
+        json_files = list(raw_dir.glob("samples_*.json"))
+        bids_files = list(raw_dir.glob("*_eeg.vhdr"))
+        return sorted(json_files + bids_files)
     return sorted(raw_dir.glob(pattern))
+
+
+def _parse_brainvision_vhdr(path: Path) -> tuple[dict, list[dict]]:
+    common = {}
+    channels = []
+    section = None
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith(";"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+                continue
+            if "=" not in line:
+                continue
+            key, value = [p.strip() for p in line.split("=", 1)]
+            if section == "Common Infos":
+                common[key] = value
+            elif section == "Channel Infos":
+                parts = [p.strip() for p in value.split(",")]
+                label = parts[0] if parts else None
+                unit = parts[2] if len(parts) > 2 else None
+                channels.append({"label": label, "unit": unit})
+    return common, channels
+
+
+def _load_brainvision_data(vhdr_path: Path, common: dict, channel_count: int) -> np.ndarray:
+    data_file = common.get("DataFile")
+    if not data_file:
+        raise ValueError("Missing DataFile in BrainVision header")
+    data_path = vhdr_path.parent / data_file
+    data = np.fromfile(data_path, dtype="<f4")
+    if channel_count <= 0:
+        raise ValueError("Invalid NumberOfChannels in BrainVision header")
+    total = (data.size // channel_count) * channel_count
+    data = data[:total]
+    return data.reshape(-1, channel_count)
+
+
+def _load_brainvision_sidecar(vhdr_path: Path) -> dict:
+    sidecar_path = vhdr_path.with_suffix(".json")
+    if not sidecar_path.exists():
+        return {}
+    with open(sidecar_path) as f:
+        return json.load(f)
+
+
+def load_brainvision_export(path: Path | str) -> dict:
+    path = Path(path)
+    common, channels_info = _parse_brainvision_vhdr(path)
+    channel_count = int(common.get("NumberOfChannels") or len(channels_info) or 0)
+    sampling_interval_us = float(common.get("SamplingInterval") or 0)
+    sampling_rate_hz = 1000000.0 / sampling_interval_us if sampling_interval_us else DEFAULT_FS
+    samples = _load_brainvision_data(path, common, channel_count)
+    sidecar = _load_brainvision_sidecar(path)
+
+    channel_labels = []
+    for idx in range(channel_count):
+        label = None
+        if idx < len(channels_info):
+            label = channels_info[idx].get("label")
+        channel_labels.append(label or f"Ch{idx + 1}")
+
+    channels = []
+    for idx, label in enumerate(channel_labels):
+        channels.append(
+            {
+                "label": label,
+                "samples": samples[:, idx].astype(float).tolist(),
+                "samplingRateHz": sampling_rate_hz,
+            }
+        )
+
+    captured_at = (
+        sidecar.get("AcquisitionDateTime")
+        or sidecar.get("RecordingStartTime")
+        or sidecar.get("CapturedAt")
+    )
+    capture_ended_at = None
+    if captured_at:
+        capture_start = coerce_timestamp(captured_at)
+        if capture_start is not None and len(samples) > 0 and sampling_rate_hz:
+            capture_ended_at = (
+                capture_start + pd.to_timedelta((len(samples) - 1) / sampling_rate_hz, unit="s")
+            ).isoformat()
+
+    export = {
+        "capturedAt": captured_at,
+        "captureEndedAt": capture_ended_at,
+        "samplingRateHz": sampling_rate_hz,
+        "sensors": "-".join(channel_labels),
+        "channels": channels,
+        "_sidecar": sidecar,
+    }
+    export["_path"] = str(path)
+    export["_file"] = path.name
+    return export
 
 
 def load_sample_export(path: Path | str) -> dict:
     path = Path(path)
+    if path.suffix.lower() == ".vhdr":
+        return load_brainvision_export(path)
     with open(path) as f:
         export = json.load(f)
     export["_path"] = str(path)
@@ -156,6 +260,8 @@ def load_sample_export(path: Path | str) -> dict:
 
 def load_sample_exports(raw_dir: Path | str, pattern: str = "samples_*.json", limit: int | None = None) -> list[dict]:
     files = list_sample_files(raw_dir, pattern=pattern)
+    if not files and pattern in (None, "", "samples_*.json"):
+        files = list_sample_files(raw_dir, pattern="*_eeg.vhdr")
     if limit is not None:
         files = files[: int(limit)]
     return [load_sample_export(p) for p in files]
@@ -169,7 +275,12 @@ def export_capture_start(export: dict) -> pd.Timestamp | None:
     path = export.get("_path")
     stem = Path(path).stem if path else None
     fallback = stem.replace("samples_", "") if stem else None
-    return coerce_timestamp(export.get("capturedAt") or fallback)
+    return coerce_timestamp(
+        export.get("capturedAt")
+        or export.get("AcquisitionDateTime")
+        or export.get("RecordingStartTime")
+        or fallback
+    )
 
 
 def export_capture_end(export: dict) -> pd.Timestamp | None:

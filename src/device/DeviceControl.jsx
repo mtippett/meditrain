@@ -30,9 +30,17 @@ function DeviceControl({ onPeriodgramUpdated, selectedChannels = [], onToggleCha
   const lastDownloadedPacket = useRef(0);
   const streamingRef = useRef(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [dataStale, setDataStale] = useState(false);
+  const [museStatus, setMuseStatus] = useState({ isConnected: false, isConnecting: false, error: null });
+  const [reconnectState, setReconnectState] = useState({ attempts: 0, lastAttemptAt: null, status: 'idle' });
+  const museRef = useRef(null);
+  const reconnectInFlightRef = useRef(false);
+  const lastReconnectAtRef = useRef(0);
   const [showPerChannelTraces, setShowPerChannelTraces] = useState(false);
   const powerInterval = useRef(0);
   const periodogramCb = useRef(onPeriodgramUpdated);
+  const wakeLockRef = useRef(null);
+  const wakeLockSupported = typeof navigator !== 'undefined' && 'wakeLock' in navigator;
 
   // Keep callback stable for the interval
   useEffect(() => {
@@ -64,14 +72,92 @@ function DeviceControl({ onPeriodgramUpdated, selectedChannels = [], onToggleCha
   useEffect(() => {
     const id = setInterval(() => {
       const last = lastEegReceivedAt.current;
-      const next = !!last && Date.now() - last < STREAM_STALE_MS;
-      if (streamingRef.current !== next) {
-        streamingRef.current = next;
-        setIsStreaming(next);
+      const isFresh = !!last && Date.now() - last < STREAM_STALE_MS;
+      if (streamingRef.current !== isFresh) {
+        streamingRef.current = isFresh;
+        setIsStreaming(isFresh);
       }
+      const stale = museStatus.isConnected && !isFresh;
+      setDataStale(stale);
     }, 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [museStatus.isConnected]);
+
+  useEffect(() => {
+    if (!dataStale) return;
+    if (!museStatus.isConnected || museStatus.isConnecting) return;
+    if (!museRef.current?.reconnect) return;
+    const now = Date.now();
+    if (reconnectInFlightRef.current) return;
+    if (now - lastReconnectAtRef.current < 5000) return;
+    reconnectInFlightRef.current = true;
+    lastReconnectAtRef.current = now;
+    setReconnectState((prev) => ({
+      attempts: prev.attempts + 1,
+      lastAttemptAt: now,
+      status: 'attempting'
+    }));
+    museRef.current
+      .reconnect()
+      .catch((err) => {
+        console.warn('Auto-reconnect failed', err);
+      })
+      .finally(() => {
+        reconnectInFlightRef.current = false;
+        setReconnectState((prev) => ({ ...prev, status: 'idle' }));
+      });
+  }, [dataStale, museStatus.isConnected, museStatus.isConnecting]);
+
+  useEffect(() => {
+    if (!wakeLockSupported) return undefined;
+    let canceled = false;
+
+    const releaseWakeLock = async () => {
+      if (wakeLockRef.current) {
+        try {
+          await wakeLockRef.current.release();
+        } catch (err) {
+          console.warn('Failed to release wake lock', err);
+        } finally {
+          wakeLockRef.current = null;
+        }
+      }
+    };
+
+    const requestWakeLock = async () => {
+      if (wakeLockRef.current || !isStreaming || document.visibilityState !== 'visible') {
+        return;
+      }
+      try {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      } catch (err) {
+        console.warn('Failed to acquire wake lock', err);
+      }
+    };
+
+    if (isStreaming) {
+      requestWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        requestWakeLock();
+      } else {
+        releaseWakeLock();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      canceled = true;
+      void canceled;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [isStreaming, wakeLockSupported]);
 
   function updateChannelMaps(maps) {
     if (channelMaps.current.length === 0) {
@@ -164,44 +250,114 @@ function DeviceControl({ onPeriodgramUpdated, selectedChannels = [], onToggleCha
     const active = (channelsForDisplayRef.current || []).filter(c => c.samples.length > 0);
     if (active.length === 0) return;
     if (requireFullWindow && active.some(c => c.samples.length < DOWNLOAD_WINDOW_SAMPLES)) return;
+
     const samplePeriodMs = 1000 / SAMPLE_RATE_HZ;
     const captureEndedAt = new Date(last);
-    const windowSamples = requireFullWindow ? DOWNLOAD_WINDOW_SAMPLES : Math.max(...active.map(c => c.samples.length));
-    const captureEndedAtIso = captureEndedAt.toISOString();
+    const availableCounts = active.map(c => c.samples.length);
+    const windowSamples = requireFullWindow
+      ? DOWNLOAD_WINDOW_SAMPLES
+      : Math.min(...availableCounts);
+    if (!windowSamples || windowSamples <= 0) return;
 
-    const channelStartsMs = [];
-    const payload = active.map(c => {
-      const samples = c.samples.slice(-windowSamples); // copy window
-      const channelCaptureStartMs =
-        captureEndedAt.getTime() - Math.max(samples.length - 1, 0) * samplePeriodMs;
-      const timestamps = samples.map((_, idx) => new Date(channelCaptureStartMs + idx * samplePeriodMs).toISOString());
-      channelStartsMs.push(channelCaptureStartMs);
+    const captureStartedAtIso = new Date(
+      captureEndedAt.getTime() - Math.max(windowSamples - 1, 0) * samplePeriodMs
+    ).toISOString();
 
-      return {
-        label: c.label || c.electrode,
-        samples,
-        samplingRateHz: SAMPLE_RATE_HZ,
-        timestamps
-      };
-    });
-    const captureStartedAtIso = new Date(Math.min(...channelStartsMs)).toISOString();
-    const sensorNames = active.map(c => c.label || c.electrode).join('-');
+    const channelLabels = active.map(c => c.label || c.electrode);
     const tsSlug = captureStartedAtIso.replace(/[:.]/g, '-');
-    const blob = new Blob([JSON.stringify({
-      capturedAt: captureStartedAtIso,
-      captureEndedAt: captureEndedAtIso,
-      samplingRateHz: SAMPLE_RATE_HZ,
-      sensors: sensorNames,
-      channels: payload
-    }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `samples_${sensorNames || 'unknown'}_${tsSlug}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    const baseName = `sub-01_ses-01_task-meditrain_run-${tsSlug}_eeg`;
+    const dataFile = `${baseName}.eeg`;
+    const headerFile = `${baseName}.vhdr`;
+    const markerFile = `${baseName}.vmrk`;
+    const channelsFile = `${baseName.replace('_eeg', '_channels')}.tsv`;
+    const sidecarFile = `${baseName}.json`;
+
+    const triggerDownload = (blob, filename) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    };
+
+    const alignedSamples = active.map(c => c.samples.slice(-windowSamples));
+    const channelCount = alignedSamples.length;
+    const interleaved = new Float32Array(windowSamples * channelCount);
+    for (let i = 0; i < windowSamples; i += 1) {
+      for (let ch = 0; ch < channelCount; ch += 1) {
+        interleaved[i * channelCount + ch] = alignedSamples[ch][i] || 0;
+      }
+    }
+
+    const headerLines = [
+      'Brain Vision Data Exchange Header File Version 1.0',
+      '; Generated by meditrain',
+      '',
+      '[Common Infos]',
+      `DataFile=${dataFile}`,
+      `MarkerFile=${markerFile}`,
+      'DataFormat=BINARY',
+      'DataOrientation=MULTIPLEXED',
+      'DataType=FLOAT32',
+      `NumberOfChannels=${channelCount}`,
+      `SamplingInterval=${Math.round(1000000 / SAMPLE_RATE_HZ)}`,
+      '',
+      '[Channel Infos]',
+      ...channelLabels.map((label, idx) => `Ch${idx + 1}=${label},,uV`)
+    ];
+
+    const markerLines = [
+      'Brain Vision Data Exchange Marker File, Version 1.0',
+      '; Generated by meditrain',
+      '',
+      '[Common Infos]',
+      `DataFile=${dataFile}`,
+      '',
+      '[Marker Infos]',
+      'Mk1=New Segment,,1,1,0,0'
+    ];
+
+    const sidecar = {
+      SamplingFrequency: SAMPLE_RATE_HZ,
+      PowerLineFrequency: 60,
+      EEGReference: 'unknown',
+      EEGGround: 'unknown',
+      SoftwareFilters: 'none',
+      RecordingType: 'continuous',
+      TaskName: 'meditrain',
+      AcquisitionDateTime: captureStartedAtIso
+    };
+
+    const channelHeader = [
+      'name',
+      'type',
+      'units',
+      'sampling_frequency',
+      'low_cutoff',
+      'high_cutoff',
+      'reference'
+    ].join('\t');
+    const channelLines = channelLabels.map(label =>
+      [
+        label,
+        'EEG',
+        'uV',
+        SAMPLE_RATE_HZ,
+        'n/a',
+        'n/a',
+        'unknown'
+      ].join('\t')
+    );
+
+    triggerDownload(new Blob([interleaved.buffer], { type: 'application/octet-stream' }), dataFile);
+    triggerDownload(new Blob([headerLines.join('\n')], { type: 'text/plain' }), headerFile);
+    triggerDownload(new Blob([markerLines.join('\n')], { type: 'text/plain' }), markerFile);
+    triggerDownload(new Blob([JSON.stringify(sidecar, null, 2)], { type: 'application/json' }), sidecarFile);
+    triggerDownload(new Blob([[channelHeader, ...channelLines].join('\n')], { type: 'text/tab-separated-values' }), channelsFile);
+
     lastDownloadedPacket.current = eegPacketsReceived.current;
   }, []);
 
@@ -219,19 +375,21 @@ function DeviceControl({ onPeriodgramUpdated, selectedChannels = [], onToggleCha
     <div className="device-panel" data-render={renderTick}>
       <div className="device-status">
         <MuseData
+          ref={museRef}
           onNewData={onNewData}
           updateChannelMaps={updateChannelMaps}
           onTelemetry={(t) => setTelemetry({ ...t, receivedAt: Date.now() })}
           onPpg={(p) => setLastPpg({ ...p, receivedAt: Date.now() })}
           onAccelerometer={(a) => setLastAccel({ ...a, receivedAt: Date.now() })}
           onGyro={(g) => setLastGyro({ ...g, receivedAt: Date.now() })}
+          onStatusChange={setMuseStatus}
         />
         {channelMaps.current.length > 0 && (
           <p className="subdued">Channels detected: {channelMaps.current.join(' • ')}</p>
         )}
         <div className="inline-status" style={{ gap: 8, flexWrap: 'wrap' }}>
           <button type="button" onClick={downloadSamples} disabled={!isStreaming}>
-            Download samples now
+            Download BIDS EEG
           </button>
           <label className="status-pill" style={{ cursor: 'pointer' }}>
             <input
@@ -252,6 +410,11 @@ function DeviceControl({ onPeriodgramUpdated, selectedChannels = [], onToggleCha
           <span className={`status-pill heartbeat ${fftBeat !== null && fftBeat < 5 ? 'alive' : ''}`}>
             Last FFT: {diag.lastFFT ? `${fftBeat}s ago` : '—'}
           </span>
+          {dataStale && (
+            <span className="status-pill" style={{ background: '#6d2828', color: '#fff' }}>
+              Data stale, reconnecting{reconnectState.attempts > 0 ? ` (${reconnectState.attempts})` : ''}
+            </span>
+          )}
         </div>
         <div className="inline-status">
           <span className="status-pill">
