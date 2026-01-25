@@ -10,6 +10,14 @@ def to_local_datetime_index(ts):
         ts = ts.dt.tz_localize('UTC')
     return ts.dt.tz_convert(local_tz)
 
+
+def _format_time_axis(ax, min_ticks=10):
+    import matplotlib.dates as mdates
+    import tzlocal
+    local_tz = tzlocal.get_localzone()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=min_ticks))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
+
 import json
 import re
 import statistics
@@ -432,6 +440,7 @@ def plot_artifact_overlays_and_metrics(
     trace_window_sec: float | None = None,
     trace_max_points: int = 4000,
     plot_diagnostics: bool = True,
+    fig_width: float = 12,
 ) -> pd.DataFrame:
     import matplotlib.pyplot as plt
 
@@ -491,15 +500,13 @@ def plot_artifact_overlays_and_metrics(
         line_hits = int(subset["line_noise_artifact"].sum())
         both_hits = int(((subset["amplitude_artifact"]) & (subset["line_noise_artifact"])).sum())
 
-        fig, ax = plt.subplots(figsize=(12, 3))
+        fig, ax = plt.subplots(figsize=(fig_width, 3), constrained_layout=True)
         if x_is_time:
             import tzlocal
             ts = to_local_datetime_index(ts_plot["timestamp"]).reset_index(drop=True)
             ax.plot(ts, ts_plot["sample"], color="#38bdf8", linewidth=0.8)
             ax.set_xlabel("Local Date/Time")
-            import matplotlib.dates as mdates
-            local_tz = tzlocal.get_localzone()
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M:%S %Z", tz=local_tz))
+            _format_time_axis(ax)
             fig.autofmt_xdate()
         else:
             ax.plot(ts_plot["t_sec"], ts_plot["sample"], color="#38bdf8", linewidth=0.8)
@@ -564,16 +571,14 @@ def plot_artifact_overlays_and_metrics(
             subset = artifact_df[artifact_df["label"] == label]
             if subset.empty:
                 continue
-            fig, axes = plt.subplots(2, 1, figsize=(12, 4), sharex=True)
+            fig, axes = plt.subplots(2, 1, figsize=(fig_width, 4), sharex=True, constrained_layout=True)
             if "timestamp" in subset.columns and subset["timestamp"].notna().any():
                 import tzlocal
                 ts = to_local_datetime_index(subset["timestamp"]).reset_index(drop=True)
                 axes[0].plot(ts, subset["amplitude_range"], color="#f97316", linewidth=1.0)
                 axes[1].plot(ts, subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
                 axes[1].set_xlabel("Local Date/Time")
-                import matplotlib.dates as mdates
-                local_tz = tzlocal.get_localzone()
-                axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M:%S %Z", tz=local_tz))
+                _format_time_axis(axes[1])
                 fig.autofmt_xdate()
             else:
                 axes[0].plot(subset["t_sec"], subset["amplitude_range"], color="#f97316", linewidth=1.0)
@@ -925,6 +930,58 @@ def heart_rate_series(samples: np.ndarray, fs: float, window_sec: int = 15, step
     return pd.DataFrame(rows)
 
 
+def plot_cardiogram(
+    samples: np.ndarray,
+    fs: float,
+    *,
+    max_points: int = 10000,
+    fig_width: float = 12,
+    title: str = "Cardiogram",
+    ax=None,
+):
+    import matplotlib.pyplot as plt
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(fig_width, 4), constrained_layout=True)
+
+    t = np.arange(len(samples)) / fs
+    
+    stride = max(1, len(samples) // max_points)
+    samples_plot = samples[::stride]
+    t_plot = t[::stride]
+
+    ax.plot(t_plot, samples_plot, linewidth=0.8)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Amplitude")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.2)
+    if ax is None:
+        plt.show()
+        plt.close(fig)
+
+def plot_heart_rate(
+    hr_series: pd.DataFrame,
+    *,
+    fig_width: float = 12,
+    title: str = "Heart Rate",
+    ax=None,
+):
+    import matplotlib.pyplot as plt
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(fig_width, 4), constrained_layout=True)
+    
+    if "t_sec" not in hr_series.columns or "bpm" not in hr_series.columns:
+        raise ValueError("hr_series dataframe must contain 't_sec' and 'bpm' columns")
+
+    ax.plot(hr_series["t_sec"], hr_series["bpm"])
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("BPM")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.2)
+    if ax is None:
+        plt.show()
+        plt.close(fig)
+
+
 def export_file_sampling_rate(export: dict, default_fs: float = DEFAULT_FS) -> float:
     return export.get("samplingRateHz") or default_fs
 
@@ -1152,14 +1209,16 @@ def infer_hemisphere(label: str) -> str | None:
 def plot_raw_traces_per_label(
     exports: list[dict],
     diag_df: pd.DataFrame | None = None,
-    window_sec: int = 10,
-    max_points: int = 3000,
     fig_width: float = 12,
     title_prefix: str = "EEG",
+    **kwargs,
 ):
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     import tzlocal
+
+    max_points = kwargs.get("max_points")
+    # window_sec is accepted via kwargs but not used to avoid breaking calls.
 
     if not exports:
         raise FileNotFoundError("No sample exports loaded")
@@ -1186,7 +1245,7 @@ def plot_raw_traces_per_label(
     print(f"Plotting window: {start_ts_local.strftime('%Y-%m-%d %H:%M:%S %Z')} to {end_ts_local.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     fig_h = max(2.2 * len(labels), 3)
-    fig, axes = plt.subplots(len(labels), 1, figsize=(fig_width, fig_h), sharex=True)
+    fig, axes = plt.subplots(len(labels), 1, figsize=(fig_width, fig_h), sharex=True, constrained_layout=True)
     if len(labels) == 1:
         axes = [axes]
 
@@ -1205,9 +1264,10 @@ def plot_raw_traces_per_label(
             ax.set_ylabel(lbl)
             ax.grid(True, alpha=0.2)
             continue
-
-        stride = max(len(dfw) // max_points, 1)
-        dfw = dfw.iloc[::stride]
+        
+        if max_points is not None and len(dfw) > max_points:
+            stride = max(len(dfw) // max_points, 1)
+            dfw = dfw.iloc[::stride]
 
         # Convert timestamps to local time
         ts = to_local_datetime_index(dfw["timestamp"]).reset_index(drop=True)
@@ -1230,16 +1290,14 @@ def plot_raw_traces_per_label(
         ax.set_ylabel(lbl)
         ax.grid(True, alpha=0.2)
 
-    local_tz = tzlocal.get_localzone()
     axes[-1].set_xlabel("Local Date/Time")
-    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
+    _format_time_axis(axes[-1])
     fig.autofmt_xdate()
     fig.suptitle(f"Raw {title_prefix} traces per channel (full session)", y=1.02)
     time_range_str = _get_time_range_str(diag_df)
     if time_range_str:
         fig.text(0.5, 0.01, time_range_str, ha='center', va='bottom', fontsize=8, color='gray')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 1])
     plt.show()
     plt.close(fig)
 
@@ -1393,8 +1451,7 @@ def plot_spectrograms_per_label(
         ax.set_ylabel(lbl)
         ax.set_ylim(0.5, max_freq_hz)
         if has_clock_time:
-            local_tz = tzlocal.get_localzone()
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
+            _format_time_axis(ax)
 
     if has_clock_time:
         axes[-1].set_xlabel("Local Date/Time")
@@ -1678,6 +1735,7 @@ def plot_band_power_diagram(
     fs: float = DEFAULT_FS,
     ax=None,
     target_history: dict[str, list[dict]] | None = None,
+    fig_width: float = 12,
 ):
     import matplotlib.pyplot as plt
     import tzlocal
@@ -1688,7 +1746,7 @@ def plot_band_power_diagram(
 
     colors = ["#22c55e", "#facc15", "#f97316", "#06b6d4", "#8b5cf6"]
     if ax is None:
-        _, ax = plt.subplots(1, 1, figsize=(12, 4.6))
+        _, ax = plt.subplots(1, 1, figsize=(fig_width, 4.6))
 
     # Try to use clock time if available
     import matplotlib.dates as mdates
@@ -1757,9 +1815,7 @@ def plot_band_power_diagram(
                     if end - start < 2:
                         continue
                     ax.plot(ts[start:end], y[start:end], linewidth=1.4, color=colors[i % len(colors)], label=band["label"] if start == 0 else None)
-        local_tz = tzlocal.get_localzone()
-        ax.set_xlabel("Local Date/Time")
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
+        _format_time_axis(ax)
         import matplotlib.pyplot as plt
         plt.gcf().autofmt_xdate()
     else:
@@ -1866,7 +1922,7 @@ def plot_band_power_diagrams(
     groups.append(("All Combined", labels))
 
     fig_h = max(2.6 * len(groups), 4)
-    fig, axes = plt.subplots(len(groups), 1, figsize=(fig_width, fig_h), sharex=True)
+    fig, axes = plt.subplots(len(groups), 1, figsize=(fig_width, fig_h), sharex=True, constrained_layout=True)
     if len(groups) == 1:
         axes = [axes]
 
@@ -1905,7 +1961,6 @@ def plot_band_power_diagrams(
     if time_range_str:
         fig.text(0.5, 0.01, time_range_str, ha='center', va='bottom', fontsize=8, color='gray')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 1])
     if show:
         plt.show()
         plt.close(fig)

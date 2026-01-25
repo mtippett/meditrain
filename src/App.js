@@ -98,7 +98,7 @@ function App() {
   const [rejectionOverlayMode, setRejectionOverlayMode] = useState(DEFAULT_SETTINGS.rejectionOverlayMode);
   const [rejectionOverlayMaxWindows, setRejectionOverlayMaxWindows] = useState(DEFAULT_SETTINGS.rejectionOverlayMaxWindows);
   const [audioEnabled, setAudioEnabled] = useState(false);
-  const [audioSensitivity, setAudioSensitivity] = useState(1);
+
   const [targetSensitivity, setTargetSensitivity] = useState({});
   const [lastFFT, setLastFFT] = useState(null);
   const audioCtxRef = useRef(null);
@@ -844,7 +844,6 @@ function App() {
       return;
     }
     audioSensitivityRef.current = { value: 1, lastUpdate: Date.now() };
-    setAudioSensitivity(1);
 
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const bufferSize = ctx.sampleRate * 2;
@@ -878,7 +877,6 @@ function App() {
   useEffect(() => {
     if (!audioEnabled || trainingTargets.length === 0) return;
     audioSensitivityRef.current = { value: 1, lastUpdate: Date.now() };
-    setAudioSensitivity(1);
   }, [audioEnabled, trainingTargets]);
 
   useEffect(() => {
@@ -920,7 +918,6 @@ function App() {
       Math.max(minAudioSensitivity, sensitivityState.value + delta)
     );
     audioSensitivityRef.current = { value: nextSensitivity, lastUpdate: now };
-    setAudioSensitivity(nextSensitivity);
 
     const norm = Math.max(0, Math.min(1, (maxDistance * 5) / nextSensitivity)); // higher sensitivity reduces feedback
     if (gainRef.current) {
