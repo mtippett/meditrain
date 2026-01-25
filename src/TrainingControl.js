@@ -1,22 +1,27 @@
 import React, { useState, useEffect } from 'react';
 import { BAND_KEYS } from './constants/bands';
 
-function TrainingControl({ availableChannels = [], selectedTargets = [], bandSnapshots = [], bandHistory = {}, deltaSmoothingSec = 10, onSaveTarget, onDeleteTarget, audioEnabled, audioSensitivity = null, audioSensitivityHistory = [], onToggleAudio, presets = [], presetsLoading = false, presetsError = null, onApplyPreset, onClearTargets }) {
+function TrainingControl({ availableChannels = [], selectedTargets = [], bandSnapshots = [], bandHistory = {}, targetHistoryById = {}, deltaSmoothingSec = 10, onSaveTarget, onDeleteTarget, audioEnabled, onToggleAudio, presets = [], presetsLoading = false, presetsError = null, onApplyPreset, onClearTargets, targetMetrics = {} }) {
   const [form, setForm] = useState({
     id: null,
     label: [],
+    model: 'relative',
     band: 'alpha',
+    numeratorBand: 'theta',
+    denominatorBand: 'beta',
     target: 0.3,
     tolerance: 0.05
   });
   const [selectedPreset, setSelectedPreset] = useState('');
 
   // Format preset name for display (snake_case -> Title Case)
-  function formatPresetName(name) {
-    return name
+  function formatPresetName(name, model) {
+    const title = name
       .split('_')
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ');
+    const label = model === 'ratio' ? 'Ratio' : 'Relative';
+    return `${title} (${label})`;
   }
 
   function handlePresetChange(e) {
@@ -41,28 +46,210 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
   function handleSubmit(e) {
     e.preventDefault();
     if (form.label.length === 0) return;
-    // prevent duplicate target for same label+band
-    const exists = selectedTargets.some(t => t.label === form.label[0] && t.band === form.band && t.id !== form.id);
+    const model = form.model || 'relative';
+    // prevent duplicate target for same label+metric
+    const exists = selectedTargets.some((t) => {
+      const tModel = t.model || 'relative';
+      if (t.label !== form.label[0] || tModel !== model || t.id === form.id) return false;
+      if (model === 'ratio') {
+        return t.numeratorBand === form.numeratorBand && t.denominatorBand === form.denominatorBand;
+      }
+      return t.band === form.band;
+    });
     if (exists) return;
     const id = form.id || Date.now().toString();
     onSaveTarget({
       id,
       label: form.label[0],
-      band: form.band,
+      model,
+      band: model === 'relative' ? form.band : null,
+      numeratorBand: model === 'ratio' ? form.numeratorBand : null,
+      denominatorBand: model === 'ratio' ? form.denominatorBand : null,
       target: Number(form.target),
       tolerance: Number(form.tolerance)
     });
-    setForm({ id: null, label: form.label, band: form.band, target: form.target, tolerance: form.tolerance });
+    setForm({
+      id: null,
+      label: form.label,
+      model,
+      band: form.band,
+      numeratorBand: form.numeratorBand,
+      denominatorBand: form.denominatorBand,
+      target: form.target,
+      tolerance: form.tolerance
+    });
   }
 
   function startEdit(target) {
     setForm({
       id: target.id,
       label: [target.label],
-      band: target.band,
+      model: target.model || 'relative',
+      band: target.band || 'alpha',
+      numeratorBand: target.numeratorBand || 'theta',
+      denominatorBand: target.denominatorBand || 'beta',
       target: target.target,
       tolerance: target.tolerance
     });
+  }
+
+  function averageSeries(series, cutoffMs) {
+    const filtered = series.filter(p => p.t >= cutoffMs);
+    if (filtered.length === 0) return null;
+    return filtered.reduce((sum, p) => sum + p.v, 0) / filtered.length;
+  }
+
+  function getSmoothedValue(target, now, smoothMs) {
+    const model = target.model || 'relative';
+    if (model === 'ratio') {
+      if (!target.numeratorBand || !target.denominatorBand) return null;
+      const numerator = bandHistory?.[target.label]?.[target.numeratorBand] || [];
+      const denominator = bandHistory?.[target.label]?.[target.denominatorBand] || [];
+      const numAvg = averageSeries(numerator, now - smoothMs);
+      const denAvg = averageSeries(denominator, now - smoothMs);
+      if (typeof numAvg !== 'number' || typeof denAvg !== 'number' || denAvg === 0) return null;
+      return numAvg / denAvg;
+    }
+    const series = bandHistory?.[target.label]?.[target.band] || [];
+    return averageSeries(series, now - smoothMs);
+  }
+
+  function buildSparklineSeries(target, now, windowMs) {
+    const model = target.model || 'relative';
+    if (model === 'ratio') {
+      if (!target.numeratorBand || !target.denominatorBand) return [];
+      const numerator = bandHistory?.[target.label]?.[target.numeratorBand] || [];
+      const denominator = bandHistory?.[target.label]?.[target.denominatorBand] || [];
+      const denomByTime = new Map(denominator.map(p => [p.t, p.v]));
+      return numerator
+        .filter(p => p.t >= now - windowMs)
+        .map(p => {
+          const denom = denomByTime.get(p.t);
+          if (typeof denom !== 'number' || denom === 0) return null;
+          return { t: p.t, v: p.v / denom };
+        })
+        .filter(Boolean);
+    }
+    const series = bandHistory?.[target.label]?.[target.band] || [];
+    return series.filter(p => p.t >= now - windowMs);
+  }
+
+  function buildTargetSeries(target, now, windowMs) {
+    const series = targetHistoryById?.[target.id] || [];
+    return series.filter(p => p.t >= now - windowMs);
+  }
+
+  function renderSparkline(points, targetSeries) {
+    const chartWidth = 140;
+    const chartHeight = 140;
+    const paddingTop = 10;
+    const paddingBottom = 14;
+    const plotHeight = chartHeight - paddingTop - paddingBottom;
+    const hasSignal = points && points.length > 1;
+    const hasTargets = targetSeries && targetSeries.length > 0;
+    if (!hasSignal && !hasTargets) {
+      return (
+        <svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="none">
+          <text x="8" y={chartHeight / 2} fill="rgba(255,255,255,0.5)" fontSize="10">No recent data</text>
+        </svg>
+      );
+    }
+    const timePoints = [...(points || []), ...(targetSeries || [])].filter(p => p && p.t != null);
+    const times = timePoints.map(p => p.t);
+    const start = Math.min(...times);
+    const end = Math.max(...times);
+    const span = Math.max(1, end - start);
+    const signalValues = (points || []).map(p => p.v);
+    const targetValues = (targetSeries || []).flatMap(p => {
+      const tol = p.tolerance || 0;
+      return [p.target - tol, p.target, p.target + tol];
+    });
+    const values = [...signalValues, ...targetValues].filter(v => typeof v === 'number');
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = Math.max(0.0001, max - min);
+    const yScale = (value) => (chartHeight - paddingBottom) - ((value - min) / range) * plotHeight;
+    const poly = (points || []).map((p) => {
+      const x = ((p.t - start) / span) * chartWidth;
+      const y = yScale(p.v);
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    const sortedTargets = (targetSeries || []).slice().sort((a, b) => a.t - b.t);
+    const targetLine = sortedTargets.map((p) => {
+      const x = ((p.t - start) / span) * chartWidth;
+      const y = yScale(p.target);
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    const targetBandPoints = sortedTargets.length > 0
+      ? [
+        ...sortedTargets.map((p) => {
+          const x = ((p.t - start) / span) * chartWidth;
+          const y = yScale(p.target + (p.tolerance || 0));
+          return `${x.toFixed(2)},${y.toFixed(2)}`;
+        }),
+        ...sortedTargets.slice().reverse().map((p) => {
+          const x = ((p.t - start) / span) * chartWidth;
+          const y = yScale(p.target - (p.tolerance || 0));
+          return `${x.toFixed(2)},${y.toFixed(2)}`;
+        })
+      ]
+      : [];
+    return (
+      <svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="none">
+        {targetBandPoints.length > 2 && (
+          <polygon
+            fill="rgba(248, 113, 113, 0.18)"
+            points={targetBandPoints.join(' ')}
+          />
+        )}
+        {targetLine.length > 1 && (
+          <polyline
+            fill="none"
+            stroke="rgba(248, 113, 113, 0.85)"
+            strokeWidth="1.5"
+            points={targetLine.join(' ')}
+          />
+        )}
+        {targetLine.length === 1 && (
+          <line
+            x1="0"
+            x2={chartWidth}
+            y1={targetLine[0].split(',')[1]}
+            y2={targetLine[0].split(',')[1]}
+            stroke="rgba(248, 113, 113, 0.85)"
+            strokeWidth="1.5"
+          />
+        )}
+        {targetBandPoints.length > 0 && targetLine.length <= 1 && (
+          <line
+            x1="0"
+            x2={chartWidth}
+            y1={targetBandPoints[0].split(',')[1]}
+            y2={targetBandPoints[0].split(',')[1]}
+            stroke="rgba(248, 113, 113, 0.4)"
+            strokeWidth="1"
+            strokeDasharray="3 2"
+          />
+        )}
+        {hasSignal && (
+          <polyline
+            fill="none"
+            stroke="rgba(96, 165, 250, 0.9)"
+            strokeWidth="2"
+            points={poly.join(' ')}
+          />
+        )}
+      </svg>
+    );
+  }
+
+  function formatTargetMetric(target) {
+    const model = target.model || 'relative';
+    if (model === 'ratio') {
+      if (!target.numeratorBand || !target.denominatorBand) return 'ratio';
+      return `${target.numeratorBand}/${target.denominatorBand} ratio`;
+    }
+    return target.band;
   }
 
   return (
@@ -84,7 +271,7 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
               <>
                 <option value="">-- Select a preset ({presets.length} available) --</option>
                 {presets.map(p => (
-                  <option key={p.name} value={p.name}>{formatPresetName(p.name)}</option>
+                  <option key={p.name} value={p.name}>{formatPresetName(p.name, p.model)}</option>
                 ))}
               </>
             )}
@@ -116,14 +303,46 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
           </select>
         </div>
         <div className="field">
-          <label>Band</label>
-          <select value={form.band} onChange={(e) => setForm({ ...form, band: e.target.value })}>
-            {BAND_KEYS.map(b => <option key={b} value={b}>{b}</option>)}
+          <label>Metric</label>
+          <select value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>
+            <option value="relative">Relative band power</option>
+            <option value="ratio">Band ratio</option>
           </select>
         </div>
         <div className="field">
-          <label>Target (relative 0-1)</label>
-          <input type="number" step="0.01" min="0" max="1" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} />
+          <label>{form.model === 'ratio' ? 'Ratio' : 'Band'}</label>
+          {form.model === 'ratio' ? (
+            <div className="ratio-fields">
+              <select
+                value={form.numeratorBand}
+                onChange={(e) => setForm({ ...form, numeratorBand: e.target.value })}
+              >
+                {BAND_KEYS.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+              <span className="ratio-sep">/</span>
+              <select
+                value={form.denominatorBand}
+                onChange={(e) => setForm({ ...form, denominatorBand: e.target.value })}
+              >
+                {BAND_KEYS.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
+          ) : (
+            <select value={form.band} onChange={(e) => setForm({ ...form, band: e.target.value })}>
+              {BAND_KEYS.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+          )}
+        </div>
+        <div className="field">
+          <label>{form.model === 'ratio' ? 'Target (ratio)' : 'Target (relative 0-1)'}</label>
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            max={form.model === 'ratio' ? undefined : 1}
+            value={form.target}
+            onChange={(e) => setForm({ ...form, target: e.target.value })}
+          />
         </div>
         <div className="field">
           <label>Tolerance (±)</label>
@@ -137,65 +356,36 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
         </div>
       </form>
 
-      {typeof audioSensitivity === 'number' && (
-        <p className="subdued">Sensitivity: {audioSensitivity.toFixed(2)}</p>
-      )}
-
-      {typeof audioSensitivity === 'number' && (
-        <div className="chart-block" style={{ marginTop: 8 }}>
-          <p className="chart-label" style={{ marginBottom: 6 }}>Sensitivity history</p>
-          <svg width="100%" height="80" viewBox="0 0 300 80" preserveAspectRatio="none">
-            {(() => {
-              const history = audioSensitivityHistory.length > 0
-                ? audioSensitivityHistory
-                : [{ t: Date.now(), v: audioSensitivity }];
-              const values = history.map(p => p.v);
-              const minV = Math.min(...values);
-              const maxV = Math.max(...values);
-              const range = Math.max(0.001, maxV - minV);
-              const denom = Math.max(1, history.length - 1);
-              const points = history.map((p, idx) => {
-                const x = (idx / denom) * 300;
-                const y = 70 - ((p.v - minV) / range) * 60;
-                return `${x},${y}`;
-              });
-              return (
-                <>
-                  <line x1="0" y1="0" x2="0" y2="70" stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
-                  <line x1="0" y1="70" x2="300" y2="70" stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
-                  <text x="2" y="10" fill="rgba(255,255,255,0.6)" fontSize="9">{maxV.toFixed(2)}</text>
-                  <text x="2" y="68" fill="rgba(255,255,255,0.6)" fontSize="9">{minV.toFixed(2)}</text>
-                  <polyline
-                    fill="none"
-                    stroke="rgba(74, 222, 128, 0.9)"
-                    strokeWidth="2"
-                    points={points.join(' ')}
-                  />
-                </>
-              );
-            })()}
-          </svg>
-        </div>
-      )}
-
       <div className="target-list">
         {selectedTargets.length === 0 && <p className="subdued">No targets yet.</p>}
         {selectedTargets.map(target => {
-          const series = bandHistory?.[target.label]?.[target.band] || [];
           const now = Date.now();
           const smoothMs = deltaSmoothingSec * 1000;
-          const filtered = series.filter(p => p.t >= now - smoothMs);
-          const avg = filtered.length ? filtered.reduce((sum, p) => sum + p.v, 0) / filtered.length : null;
+          const windowMs = Math.max(5, deltaSmoothingSec) * 1000;
+          const avg = getSmoothedValue(target, now, smoothMs);
           const delta = typeof avg === 'number' ? avg - target.target : null;
+          const metric = targetMetrics[target.id];
+          const effectiveTol = metric?.effectiveTolerance ?? target.tolerance;
+          const sparkline = buildSparklineSeries(target, now, windowMs);
+          const targetSeries = buildTargetSeries(target, now, windowMs);
           return (
             <div key={target.id} className="target-item">
               <div>
-                <strong>{target.label}</strong> • {target.band} • target {target.target} ± {target.tolerance}
+                <strong>{target.label}</strong> • {formatTargetMetric(target)} • target {target.target} ± {target.tolerance}
                 {typeof avg === 'number' && (
                   <span className="target-delta">
                     {' '}| avg {avg.toFixed(3)} | Δ {delta >= 0 ? '+' : ''}{delta.toFixed(3)}
                   </span>
                 )}
+                {metric && (
+                  <span className="target-delta">
+                    {' '}| sensitivity {metric.sensitivity.toFixed(2)}x • effective ± {effectiveTol.toFixed(3)}
+                  </span>
+                )}
+              </div>
+              <div className="chart-block" style={{ marginTop: 6 }}>
+                <p className="chart-label" style={{ marginBottom: 4 }}>Signal vs target band</p>
+                {renderSparkline(sparkline, targetSeries)}
               </div>
               <div className="inline-buttons">
                 <button type="button" onClick={() => startEdit(target)}>Edit</button>
@@ -212,11 +402,11 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
 function areEqual(prev, next) {
   const simple =
     prev.audioEnabled === next.audioEnabled &&
-    prev.audioSensitivity === next.audioSensitivity &&
-    prev.audioSensitivityHistory === next.audioSensitivityHistory &&
+    prev.targetMetrics === next.targetMetrics &&
     prev.deltaSmoothingSec === next.deltaSmoothingSec &&
     prev.bandSnapshots === next.bandSnapshots &&
     prev.bandHistory === next.bandHistory &&
+    prev.targetHistoryById === next.targetHistoryById &&
     prev.onSaveTarget === next.onSaveTarget &&
     prev.onDeleteTarget === next.onDeleteTarget &&
     prev.onToggleAudio === next.onToggleAudio &&
@@ -239,8 +429,8 @@ function areEqual(prev, next) {
   const nextPresets = (next.presets || []).map(p => p.name).join('|');
   if (prevPresets !== nextPresets) return false;
 
-  const prevTargets = prev.selectedTargets.map(t => `${t.id}-${t.label}-${t.band}-${t.target}-${t.tolerance}`).join('|');
-  const nextTargets = next.selectedTargets.map(t => `${t.id}-${t.label}-${t.band}-${t.target}-${t.tolerance}`).join('|');
+  const prevTargets = prev.selectedTargets.map(t => `${t.id}-${t.label}-${t.model}-${t.band}-${t.numeratorBand}-${t.denominatorBand}-${t.target}-${t.tolerance}`).join('|');
+  const nextTargets = next.selectedTargets.map(t => `${t.id}-${t.label}-${t.model}-${t.band}-${t.numeratorBand}-${t.denominatorBand}-${t.target}-${t.tolerance}`).join('|');
   return prevTargets === nextTargets;
 }
 

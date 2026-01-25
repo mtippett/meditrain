@@ -7,127 +7,92 @@ title: Architecture
 ---
 graph TB
     App --> DeviceControl
+    App --> BandPower
+    App --> BandPeriodograms
+    App --> Spectrogram
+    App --> TrainingControl
+    App --> TrainingView
+    App --> HeartObservatory
+    App --> ArtifactsPanel
+    App --> ExportDownload
 
-    App --> BrainView
-    App-->BandPower
-    App --> Training
-    App --> Logging
-
-    
     subgraph Device
-        DeviceControl-->MuseData
+        DeviceControl --> MuseData
     end
 
-    subgraph Bands
-        BandPower
+    subgraph Processing
+        DeviceControl --> Periodograms
+        DeviceControl --> ArtifactDetection
     end
 
-
-    subgraph BrainViews
-        EEGChart[[EEGChart]]
-        PeriodGramChart[[PeriodGramChart]]
-        ElectrodeBandPowerChart[[BandPowerChart]]
-        RegionBandPowerChart[[BandPowerChart]]
-        BandPowerBalanceChart[[BandPowerBalanceChart]]
-        BrainView-->ElectrodeView
-        ElectrodeView-->EEGChart
-        ElectrodeView-->PeriodGramChart
-        ElectrodeView-->ElectrodeBandPowerChart
-        BrainView-->RegionView
-        RegionView-->RegionBandPowerChart
-        RegionView-->BandPowerBalanceChart
-
-    end
-
-    subgraph Training
-        TraningConfig
-    end
-
-    subgraph Logging
-        Logger
-    end
-
-    MuseData -.-> |RawEEGData|DeviceControl
-    DeviceControl -.-> |EEGData|App
-    DeviceControl -.-> |ChannelMap|App
-    BandPower -.-> |BandPowerData|App
-    Training -.-> |TrainingData|App
-
+    MuseData -.-> |RawEEG/PPG|DeviceControl
+    DeviceControl -.-> |EEG/PPG buffers, periodograms, artifacts|App
+    App -.-> |Band snapshots & targets|BandPower
+    App -.-> |Target metrics|TrainingView
+    App -.-> |Exports|ExportDownload
 ```
 
 ## Key Components & APIs
 
-All components will have a visual component.
+All components have a visual component unless noted.
 
 ### Device
-**Device** components abstract and configure the hardware. 
+**Device** components abstract and configure the hardware.
 
 The visual components allow for device configuration and connection.
 
-Device Configuration is passed up, typically on configuration change.
+Device configuration is passed up on configuration change.
 ```json
 {
-    "deviceType": <deviceinfo>,
-    "locations": ["<location>","<location>"], 
-    "sampleRate": <samplerate>
+  "deviceType": "<deviceinfo>",
+  "locations": ["<location>", "<location>"],
+  "sampleRate": "<samplerate>"
 }
 ```
 
-Raw eegData is passed up regularly typically once a second. This data should be as raw as 
-possible, however filtering or time domain transient rejection could be implemented here.
+Raw EEG/PPG data is passed up regularly (typically once a second). This data is as raw as
+possible; artifact detection happens during processing.
 ```json
-    [
-        {
-            "location": <location>,
-            "eegData": [...]
-        },
-    ...
-    ]
+[
+  {
+    "location": "<location>",
+    "eegData": [...]
+  }
+]
 ```
 
-### BandPower
+### Processing
+`DeviceControl` converts raw samples into FFT periodograms and computes artifact windows.
+Artifacts are reported per electrode so UI overlays can indicate rejection windows.
 
-The visual components allow configuration of filtering, windowing or other frequency domain operations.
+### Band Power
+`App` derives band snapshots from periodograms and `BandPower` visualizes the results with
+target overlays and history.
 
-The BandPower components converts the raw EEG signals into periodograms via FFT, and then calculates 
-absolute and relative band power for each electrode as well as averages across regions such as left/right/front left.  
-Frequency domain filtering should happen within these components.
-
-Band Power Information is passed up
 ```json
-    [
-        { 
-            "location": <location | region>,
-            "bands": [
-                { 
-                    "name": <band name>,
-                    "absolutePower": [...],
-                    "relativePower": [...],
-                }
-            ]
-        }
-    ]
-
+{
+  "label": "<location>",
+  "bands": {
+    "alpha": { "absolute": 0.0, "relative": 0.0 }
+  },
+  "timestamp": 0
+}
 ```
-
-### BrainView
-
-The visual components allow for understanding what state different brain regions are at and understand region synchronicity
-
-No Information is passed up
 
 ### Training
+`TrainingControl` manages targets (relative or ratio), and `TrainingView` displays training state.
+Audio feedback uses target distance and sensitivity to attenuate output.
 
-The visual components are training mode selection tools this could include
-- bio feedback mechanism (sound/visual) possibly via plugins
-- feedback tunables (aggressiveness, method) via plugins
-- training targets (relative band powers, symmetry
-
-The non-visual components do the training, feedback etc.
-
-Training Information is passed up
 ```json
-TBD
+{
+  "id": "<target-id>",
+  "label": "<location|group>",
+  "model": "relative|ratio",
+  "target": 0.0,
+  "tolerance": 0.0
+}
 ```
 
 ### Logging/Archiving
+Exports include raw EEG/PPG data plus sidecar JSON that captures targets, target history, and
+processing configuration for session analysis.

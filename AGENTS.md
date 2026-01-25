@@ -14,4 +14,5 @@ This project has domain documentation that should guide your responses and edits
 2) When touching data flow or processing, keep `DeviceControl`, `MuseData`, and `BandPower` contracts consistent with the definitions in `docs/design.md`.
 3) If you propose new features (training targets, logging, simulation), check the open questions in `docs/requirements.md` and call out any assumptions.
 4) When updating documentation, keep the three docs in sync: architecture diagram → design narrative → requirements.
-5) Avoid destructive git operations; do not revert user changes unless explicitly instructed.
+5) Run `npm run lint` (eslint) after code changes and report the result.
+6) Avoid destructive git operations; do not revert user changes unless explicitly instructed.

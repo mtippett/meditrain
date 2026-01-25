@@ -1,81 +1,198 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DeviceControl from './device/DeviceControl';
 import BandPower from './BandPower';
 import TrainingControl from './TrainingControl';
 import TrainingView from './TrainingView';
 import Spectrogram from './Spectrogram';
 import BandPeriodograms from './BandPeriodograms';
+import TimeSeriesLineChart from './ui/TimeSeriesLineChart';
+import EEGTraceChart from './ui/EEGTraceChart';
+import { PanelControlButton, PanelControls, PanelHeading } from './ui/PanelControls';
 
 import './App.css';
 import { STANDARD_BANDS } from './constants/bands';
-import localBandTargets from './band_targets.json';
+
+const FALLBACK_SETTINGS = {
+  selectedChannels: [],
+  trainingTargets: [],
+  bandWindowSec: 300,
+  spectrogramWindowSec: 300,
+  bandSmoothingSec: 20,
+  deltaSmoothingSec: 20,
+  eegTraceWindow: 4096,
+  eegFftWindow: 1024,
+  ppgTraceWindow: 1024,
+  notchHz: 50,
+  spectrogramUseCachedSlices: true,
+  artifactWindowSec: 2,
+  artifactStepSec: 1,
+  amplitudeRangeThreshold: 150,
+  lineNoiseHz: 60,
+  lineNoiseBandHz: 2,
+  lineNoiseMaxHz: 80,
+  lineNoiseRatioThreshold: 0.5,
+  targetSensitivityRisePerSec: 0.002,
+  targetSensitivityFallPerSec: 0.008,
+  targetSensitivityMin: 0.0,
+  targetSensitivityMax: 2.0,
+  audioSensitivityRisePerSec: 0.01,
+  audioSensitivityFallPerSec: 0.003,
+  audioSensitivityMin: 1.0,
+  audioSensitivityMax: 2.0,
+  audioFeedbackScale: 5,
+  audioFeedbackGain: 0.2,
+  audioIncreaseStopNorm: 0.5,
+  rejectionOverlayMode: 'auto',
+  rejectionOverlayMaxWindows: 200,
+  showBandPower: false,
+  showPeriodograms: false,
+  showSpectrogram: false,
+  showArtifactDiagnostics: true
+};
+
+const DEFAULT_SETTINGS = FALLBACK_SETTINGS;
+
+function getTargetModel(target) {
+  return target?.model === 'ratio' ? 'ratio' : 'relative';
+}
+
+function resolveTargetValue(target, snapshotMap) {
+  const snapshot = snapshotMap.get(target.label);
+  if (!snapshot) return null;
+  const model = getTargetModel(target);
+  if (model === 'ratio') {
+    const numerator = snapshot.bands?.[target.numeratorBand]?.relative;
+    const denominator = snapshot.bands?.[target.denominatorBand]?.relative;
+    if (typeof numerator !== 'number' || typeof denominator !== 'number' || denominator === 0) {
+      return null;
+    }
+    return numerator / denominator;
+  }
+  const value = snapshot.bands?.[target.band]?.relative;
+  return typeof value === 'number' ? value : null;
+}
 
 function App() {
   const [eegData, setEEGData] = useState([]);
-  const [selectedChannels, setSelectedChannels] = useState([]);
-  const [trainingTargets, setTrainingTargets] = useState([]);
+  const [selectedChannels, setSelectedChannels] = useState(DEFAULT_SETTINGS.selectedChannels);
+  const [trainingTargets, setTrainingTargets] = useState(DEFAULT_SETTINGS.trainingTargets);
   const [bandSnapshots, setBandSnapshots] = useState([]);
   const [bandHistory, setBandHistory] = useState({});
-  const [bandWindowSec, setBandWindowSec] = useState(120);
-  const [spectrogramWindowSec, setSpectrogramWindowSec] = useState(300);
-  const [bandSmoothingSec, setBandSmoothingSec] = useState(10);
-  const [deltaSmoothingSec, setDeltaSmoothingSec] = useState(10);
+  const [targetHistory, setTargetHistory] = useState({});
+  const [targetHistoryById, setTargetHistoryById] = useState({});
+  const [bandWindowSec, setBandWindowSec] = useState(DEFAULT_SETTINGS.bandWindowSec);
+  const [spectrogramWindowSec, setSpectrogramWindowSec] = useState(DEFAULT_SETTINGS.spectrogramWindowSec);
+  const [bandSmoothingSec, setBandSmoothingSec] = useState(DEFAULT_SETTINGS.bandSmoothingSec);
+  const [deltaSmoothingSec, setDeltaSmoothingSec] = useState(DEFAULT_SETTINGS.deltaSmoothingSec);
+  const [eegTraceWindow, setEegTraceWindow] = useState(DEFAULT_SETTINGS.eegTraceWindow);
+  const [eegFftWindow, setEegFftWindow] = useState(DEFAULT_SETTINGS.eegFftWindow);
+  const [ppgTraceWindow, setPpgTraceWindow] = useState(DEFAULT_SETTINGS.ppgTraceWindow);
+  const [notchHz, setNotchHz] = useState(DEFAULT_SETTINGS.notchHz);
+  const [artifactWindowSec, setArtifactWindowSec] = useState(DEFAULT_SETTINGS.artifactWindowSec);
+  const [artifactStepSec, setArtifactStepSec] = useState(DEFAULT_SETTINGS.artifactStepSec);
+  const [amplitudeRangeThreshold, setAmplitudeRangeThreshold] = useState(DEFAULT_SETTINGS.amplitudeRangeThreshold);
+  const [lineNoiseHz, setLineNoiseHz] = useState(DEFAULT_SETTINGS.lineNoiseHz);
+  const [lineNoiseBandHz, setLineNoiseBandHz] = useState(DEFAULT_SETTINGS.lineNoiseBandHz);
+  const [lineNoiseMaxHz, setLineNoiseMaxHz] = useState(DEFAULT_SETTINGS.lineNoiseMaxHz);
+  const [lineNoiseRatioThreshold, setLineNoiseRatioThreshold] = useState(DEFAULT_SETTINGS.lineNoiseRatioThreshold);
+  const [rejectionOverlayMode, setRejectionOverlayMode] = useState(DEFAULT_SETTINGS.rejectionOverlayMode);
+  const [rejectionOverlayMaxWindows, setRejectionOverlayMaxWindows] = useState(DEFAULT_SETTINGS.rejectionOverlayMaxWindows);
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [audioSensitivity, setAudioSensitivity] = useState(1);
-  const [audioSensitivityHistory, setAudioSensitivityHistory] = useState([]);
+  const [targetSensitivity, setTargetSensitivity] = useState({});
   const [lastFFT, setLastFFT] = useState(null);
   const audioCtxRef = useRef(null);
   const gainRef = useRef(null);
   const noiseRef = useRef(null);
   const audioSensitivityRef = useRef({ value: 1, lastUpdate: Date.now() });
+  const lastGoodSnapshotRef = useRef({});
   const lastBandSigRef = useRef({});
-  const [showBandPower, setShowBandPower] = useState(false);
-  const [showPeriodograms, setShowPeriodograms] = useState(false);
-  const [showSpectrogram, setShowSpectrogram] = useState(false);
+  const defaultSettingsRef = useRef(DEFAULT_SETTINGS);
+  const [showBandPower, setShowBandPower] = useState(DEFAULT_SETTINGS.showBandPower);
+  const [showPeriodograms, setShowPeriodograms] = useState(DEFAULT_SETTINGS.showPeriodograms);
+  const [showSpectrogram, setShowSpectrogram] = useState(DEFAULT_SETTINGS.showSpectrogram);
+  const [spectrogramUseCachedSlices, setSpectrogramUseCachedSlices] = useState(DEFAULT_SETTINGS.spectrogramUseCachedSlices);
+  const [showArtifactDiagnostics, setShowArtifactDiagnostics] = useState(DEFAULT_SETTINGS.showArtifactDiagnostics);
+  const [deviceDebug, setDeviceDebug] = useState(null);
   const [fullscreenPanel, setFullscreenPanel] = useState(null);
+  const [heartData, setHeartData] = useState({
+    heartRateBpm: null,
+    combinedPpg: null,
+    cardiogramPpg: null,
+    ppgChannels: [],
+    sampleRateHz: 64
+  });
+  const [heartRateHistory, setHeartRateHistory] = useState([]);
   const [bandTargetPresets, setBandTargetPresets] = useState({ profiles: [] });
   const [presetsLoading, setPresetsLoading] = useState(true);
   const [presetsError, setPresetsError] = useState(null);
+  const controlIcons = useMemo(() => ({
+    show: '○',
+    hide: '◉',
+    expand: '⤢',
+    collapse: '⤡'
+  }), []);
+
+  function applySettings(settings) {
+    const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+    setSelectedChannels(Array.isArray(merged.selectedChannels) ? merged.selectedChannels : DEFAULT_SETTINGS.selectedChannels);
+    setTrainingTargets(Array.isArray(merged.trainingTargets) ? merged.trainingTargets : DEFAULT_SETTINGS.trainingTargets);
+    if (typeof merged.bandWindowSec === 'number') setBandWindowSec(merged.bandWindowSec);
+    if (typeof merged.spectrogramWindowSec === 'number') setSpectrogramWindowSec(merged.spectrogramWindowSec);
+    if (typeof merged.bandSmoothingSec === 'number') setBandSmoothingSec(merged.bandSmoothingSec);
+    if (typeof merged.deltaSmoothingSec === 'number') setDeltaSmoothingSec(merged.deltaSmoothingSec);
+    if (typeof merged.eegTraceWindow === 'number') setEegTraceWindow(merged.eegTraceWindow);
+    if (typeof merged.eegFftWindow === 'number') setEegFftWindow(merged.eegFftWindow);
+    if (typeof merged.ppgTraceWindow === 'number') setPpgTraceWindow(merged.ppgTraceWindow);
+    if (typeof merged.notchHz === 'number') setNotchHz(merged.notchHz);
+    if (typeof merged.spectrogramUseCachedSlices === 'boolean') {
+      setSpectrogramUseCachedSlices(merged.spectrogramUseCachedSlices);
+    }
+    if (typeof merged.artifactWindowSec === 'number') setArtifactWindowSec(merged.artifactWindowSec);
+    if (typeof merged.artifactStepSec === 'number') setArtifactStepSec(merged.artifactStepSec);
+    if (typeof merged.amplitudeRangeThreshold === 'number') setAmplitudeRangeThreshold(merged.amplitudeRangeThreshold);
+    if (typeof merged.lineNoiseHz === 'number') setLineNoiseHz(merged.lineNoiseHz);
+    if (typeof merged.lineNoiseBandHz === 'number') setLineNoiseBandHz(merged.lineNoiseBandHz);
+    if (typeof merged.lineNoiseMaxHz === 'number') setLineNoiseMaxHz(merged.lineNoiseMaxHz);
+    if (typeof merged.lineNoiseRatioThreshold === 'number') setLineNoiseRatioThreshold(merged.lineNoiseRatioThreshold);
+    if (typeof merged.rejectionOverlayMode === 'string') setRejectionOverlayMode(merged.rejectionOverlayMode);
+    if (typeof merged.rejectionOverlayMaxWindows === 'number') setRejectionOverlayMaxWindows(merged.rejectionOverlayMaxWindows);
+    if (typeof merged.showBandPower === 'boolean') setShowBandPower(merged.showBandPower);
+    if (typeof merged.showPeriodograms === 'boolean') setShowPeriodograms(merged.showPeriodograms);
+    if (typeof merged.showSpectrogram === 'boolean') setShowSpectrogram(merged.showSpectrogram);
+    if (typeof merged.showArtifactDiagnostics === 'boolean') setShowArtifactDiagnostics(merged.showArtifactDiagnostics);
+  }
 
   // Load band target presets from JSON
   useEffect(() => {
     setPresetsLoading(true);
     setPresetsError(null);
     // Use PUBLIC_URL to handle apps deployed to subdirectories (e.g., /meditrain)
-    const url = `${process.env.PUBLIC_URL}/band_targets.json`;
-    fetch(url)
+    const cacheBust = Date.now();
+    const url = `${process.env.PUBLIC_URL}/band_targets.json?ts=${cacheBust}`;
+    fetch(url, { cache: 'no-store', headers: { 'Cache-Control': 'no-store' } })
       .then(res => {
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+          throw new Error(`Failed to load band_targets.json: HTTP ${res.status} ${res.statusText}`);
         }
         // Check content-type to ensure we got JSON, not HTML fallback
         const contentType = res.headers.get('content-type');
         if (contentType && contentType.includes('text/html')) {
-          throw new Error('Expected JSON but got HTML (likely base path or SPA fallback)');
+          throw new Error('Failed to load band_targets.json: received HTML (likely base path or SPA fallback)');
         }
         return res.json();
       })
       .then(data => {
         if (!data.profiles || !Array.isArray(data.profiles)) {
-          throw new Error('Invalid JSON: missing profiles array');
+          throw new Error('Failed to load band_targets.json: missing profiles array');
         }
         setBandTargetPresets(data);
         setPresetsLoading(false);
       })
       .catch(err => {
-        console.error('Failed to load band_targets.json:', err);
-        // Fall back to bundled presets from src/band_targets.json so the UI still works.
-        try {
-          if (!localBandTargets.profiles || !Array.isArray(localBandTargets.profiles)) {
-            throw new Error('Invalid localBandTargets: missing profiles array');
-          }
-          setBandTargetPresets(localBandTargets);
-          setPresetsError((err && err.message ? err.message : 'Unknown error') + ' (using bundled presets)');
-        } catch (fallbackErr) {
-          setPresetsError((err && err.message ? err.message : 'Unknown error') + ' (fallback failed)');
-        } finally {
-          setPresetsLoading(false);
-        }
+        setPresetsLoading(false);
+        setPresetsError(err && err.message ? err.message : 'Failed to load band_targets.json');
+        throw err;
       });
   }, []);
 
@@ -112,26 +229,40 @@ function App() {
     }
   }, [availableChannels, selectedChannels.length]);
 
-  // Load persisted settings
+  // Load defaults and then apply persisted settings
   useEffect(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem('meditrain-settings') || '{}');
-      if (stored.selectedChannels) setSelectedChannels(stored.selectedChannels);
-      if (stored.trainingTargets) setTrainingTargets(stored.trainingTargets);
-      if (stored.bandWindowSec) setBandWindowSec(stored.bandWindowSec);
-      if (stored.spectrogramWindowSec) setSpectrogramWindowSec(stored.spectrogramWindowSec);
-      if (stored.bandSmoothingSec) setBandSmoothingSec(stored.bandSmoothingSec);
-      if (stored.deltaSmoothingSec) setDeltaSmoothingSec(stored.deltaSmoothingSec);
-      if (typeof stored.showBandPower === 'boolean') setShowBandPower(stored.showBandPower);
-      if (typeof stored.showPeriodograms === 'boolean') setShowPeriodograms(stored.showPeriodograms);
-      if (typeof stored.showSpectrogram === 'boolean') setShowSpectrogram(stored.showSpectrogram);
-    } catch (e) {
-      // ignore parse errors
-    }
+    let active = true;
+    const loadSettings = async () => {
+      const cacheBust = Date.now();
+      const url = `${process.env.PUBLIC_URL}/default_settings.json?ts=${cacheBust}`;
+      const res = await fetch(url, { cache: 'no-store', headers: { 'Cache-Control': 'no-store' } });
+      if (!res.ok) {
+        throw new Error(`Failed to load default_settings.json: HTTP ${res.status} ${res.statusText}`);
+      }
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('text/html')) {
+        throw new Error('Failed to load default_settings.json: received HTML (likely base path or SPA fallback)');
+      }
+      const data = await res.json();
+      const defaults = { ...DEFAULT_SETTINGS, ...(data || {}) };
+      if (!active) return;
+      defaultSettingsRef.current = defaults;
+      applySettings(defaults);
+      try {
+        const stored = JSON.parse(localStorage.getItem('meditrain-settings') || '{}');
+        const merged = { ...defaults, ...(stored || {}) };
+        applySettings(merged);
+      } catch (e) {
+        // ignore parse errors
+      }
+    };
+    loadSettings();
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Persist settings
-  useEffect(() => {
+  const handleSaveSettings = useCallback(() => {
     const payload = {
       selectedChannels,
       trainingTargets,
@@ -139,9 +270,24 @@ function App() {
       spectrogramWindowSec,
       bandSmoothingSec,
       deltaSmoothingSec,
+      eegTraceWindow,
+      eegFftWindow,
+      ppgTraceWindow,
+      notchHz,
+      spectrogramUseCachedSlices,
+      artifactWindowSec,
+      artifactStepSec,
+      amplitudeRangeThreshold,
+      lineNoiseHz,
+      lineNoiseBandHz,
+      lineNoiseMaxHz,
+      lineNoiseRatioThreshold,
+      rejectionOverlayMode,
+      rejectionOverlayMaxWindows,
       showBandPower,
       showPeriodograms,
-      showSpectrogram
+      showSpectrogram,
+      showArtifactDiagnostics
     };
     localStorage.setItem('meditrain-settings', JSON.stringify(payload));
   }, [
@@ -151,15 +297,106 @@ function App() {
     spectrogramWindowSec,
     bandSmoothingSec,
     deltaSmoothingSec,
+    eegTraceWindow,
+    eegFftWindow,
+    ppgTraceWindow,
+    notchHz,
+    spectrogramUseCachedSlices,
+    artifactWindowSec,
+    artifactStepSec,
+    amplitudeRangeThreshold,
+    lineNoiseHz,
+    lineNoiseBandHz,
+    lineNoiseMaxHz,
+    lineNoiseRatioThreshold,
+    rejectionOverlayMode,
+    rejectionOverlayMaxWindows,
     showBandPower,
     showPeriodograms,
-    showSpectrogram
+    showSpectrogram,
+    showArtifactDiagnostics
   ]);
+
+  const handleResetDefaults = useCallback(() => {
+    applySettings(defaultSettingsRef.current || DEFAULT_SETTINGS);
+    localStorage.removeItem('meditrain-settings');
+  }, []);
+
+  useEffect(() => {
+    if (heartData.heartRateBpm == null) return;
+    const now = Date.now();
+    setHeartRateHistory((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && now - last.t < 1000) {
+        return prev;
+      }
+      const cutoff = now - 5 * 60 * 1000;
+      const next = [...prev, { t: now, v: heartData.heartRateBpm }].filter(p => p.t >= cutoff);
+      return next;
+    });
+  }, [heartData.heartRateBpm]);
+
+  useEffect(() => {
+    if (eegTraceWindow < eegFftWindow) {
+      setEegTraceWindow(eegFftWindow);
+    }
+  }, [eegFftWindow, eegTraceWindow]);
 
   const filteredEegData =
     selectedChannels.length === 0
       ? eegData
       : eegData.filter(c => selectedChannels.includes(c.label || c.electrode));
+  const artifactChannels = useMemo(() => (
+    filteredEegData.map((channel) => {
+      const label = channel.label || channel.electrode;
+      const samples = channel.samples?.slice(-eegTraceWindow) || [];
+      const artifactWindows = Array.isArray(channel.artifactWindows) ? channel.artifactWindows : [];
+      const latest = channel.artifactLatest || artifactWindows[artifactWindows.length - 1] || null;
+      return {
+        label,
+        samples,
+        artifactWindows,
+        latest
+      };
+    })
+  ), [filteredEegData, eegTraceWindow]);
+
+  const integrateBandPower = useCallback((freqs, mags, minHz, maxHz) => {
+    const xs = [];
+    const ys = [];
+    for (let i = 0; i < freqs.length; i += 1) {
+      const f = freqs[i];
+      if (f >= minHz && f < maxHz) {
+        xs.push(f);
+        ys.push(mags[i]);
+      }
+    }
+    if (xs.length < 2) return 0;
+    let total = 0;
+    for (let i = 1; i < xs.length; i += 1) {
+      total += (xs[i] - xs[i - 1]) * (ys[i] + ys[i - 1]) * 0.5;
+    }
+    return total;
+  }, []);
+
+  const median = useCallback((values) => {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) return sorted[mid];
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }, []);
+
+  const robustPeriodogram = useCallback((periodograms) => {
+    if (!periodograms || periodograms.length === 0) return null;
+    const base = periodograms[0];
+    if (!base?.frequencies || !base?.magnitudes) return null;
+    const mags = base.magnitudes.map((_, idx) => {
+      const vals = periodograms.map(p => p.magnitudes?.[idx]).filter(v => typeof v === 'number');
+      return median(vals);
+    });
+    return { frequencies: base.frequencies, magnitudes: mags };
+  }, [median]);
 
   // Always compute band snapshots from incoming FFTs, regardless of which panels are visible
   useEffect(() => {
@@ -171,22 +408,29 @@ function App() {
     const snapshots = [];
     const now = Date.now();
     channelList.forEach(electrode => {
-      if (!electrode?.averagedPeriodogram) return;
+      const label = electrode.label || electrode.electrode;
+      if (electrode?.artifactLatest?.amplitudeArtifact || electrode?.artifactLatest?.lineNoiseArtifact) {
+        const fallback = lastGoodSnapshotRef.current[label];
+        if (fallback) {
+          snapshots.push({ ...fallback, timestamp: now });
+        }
+        return;
+      }
+      const periodograms = electrode?.periodograms?.length ? electrode.periodograms : [];
+      const robust = robustPeriodogram(periodograms);
+      const periodogram = robust || electrode?.averagedPeriodogram;
+      if (!periodogram) return;
       const bandTotals = {};
       let totalPower = 0;
       STANDARD_BANDS.forEach(({ key }) => {
         bandTotals[key] = 0;
       });
-      const freqs = electrode.averagedPeriodogram.frequencies;
-      const mags = electrode.averagedPeriodogram.magnitudes;
-      const binWidth = freqs.length > 1 ? Math.abs(freqs[1] - freqs[0]) : 1;
-      freqs.forEach((freq, idx) => {
-        const power = mags[idx] * binWidth; // integrate PSD over bin width
-        const band = STANDARD_BANDS.find(b => freq >= b.min && freq < b.max);
-        if (band) {
-          bandTotals[band.key] += power;
-          totalPower += power;
-        }
+      const freqs = periodogram.frequencies;
+      const mags = periodogram.magnitudes;
+      STANDARD_BANDS.forEach(({ key, min, max }) => {
+        const power = integrateBandPower(freqs, mags, min, max);
+        bandTotals[key] += power;
+        totalPower += power;
       });
       const bands = {};
       STANDARD_BANDS.forEach(({ key }) => {
@@ -196,7 +440,9 @@ function App() {
           relative: totalPower > 0 ? absolute / totalPower : 0
         };
       });
-      snapshots.push({ label: electrode.label || electrode.electrode, bands, timestamp: now });
+      const snapshot = { label, bands, timestamp: now };
+      lastGoodSnapshotRef.current[label] = snapshot;
+      snapshots.push(snapshot);
     });
 
     const snapshotMap = Object.fromEntries(snapshots.map(s => [s.label, s]));
@@ -227,7 +473,7 @@ function App() {
     addAggregate('PAIR_AF7_8', ['AF7', 'AF8']);
 
     setBandSnapshots(snapshots);
-  }, [eegData, selectedChannels]);
+  }, [eegData, selectedChannels, integrateBandPower, robustPeriodogram]);
 
   // Maintain rolling history for band power over the same 120s window used by the charts
   useEffect(() => {
@@ -282,6 +528,236 @@ function App() {
     });
   }, [bandSnapshots, bandWindowSec, bandSmoothingSec]);
 
+  useEffect(() => {
+    if (trainingTargets.length === 0) {
+      setTargetSensitivity({});
+      return;
+    }
+    const now = Date.now();
+    setTargetSensitivity((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      const activeIds = new Set(trainingTargets.map(t => t.id));
+      trainingTargets.forEach((target) => {
+        if (!next[target.id]) {
+          next[target.id] = { value: 1, lastUpdate: now, inZone: false };
+          changed = true;
+        }
+      });
+      Object.keys(next).forEach((id) => {
+        if (!activeIds.has(id)) {
+          delete next[id];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [trainingTargets]);
+
+  useEffect(() => {
+    if (trainingTargets.length === 0 || bandSnapshots.length === 0) return;
+    const now = Date.now();
+    const snapshotMap = new Map(bandSnapshots.map(s => [s.label, s]));
+    const rateUpPerSec = 0.002;
+    const rateDownPerSec = 0.008;
+    const minSensitivity = 0.0;
+    const maxSensitivity = 2.0;
+
+    setTargetSensitivity((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      trainingTargets.forEach((target) => {
+        const current = resolveTargetValue(target, snapshotMap);
+        const baseTol = typeof target.tolerance === 'number' ? target.tolerance : 0;
+        const prevState = next[target.id] || { value: 1, lastUpdate: now, inZone: false };
+        const elapsedSec = Math.max(0, (now - prevState.lastUpdate) / 1000);
+        if (elapsedSec === 0) {
+          return;
+        }
+        const effectiveTol = prevState.value > 0 ? baseTol / prevState.value : baseTol;
+        const inZone = typeof current === 'number'
+          ? Math.abs(current - target.target) <= effectiveTol
+          : prevState.inZone;
+        const delta = (inZone ? rateUpPerSec : -rateDownPerSec) * elapsedSec;
+        const updatedValue = Math.min(maxSensitivity, Math.max(minSensitivity, prevState.value + delta));
+        const updated = {
+          value: updatedValue,
+          lastUpdate: now,
+          inZone
+        };
+        if (
+          updated.value !== prevState.value ||
+          updated.inZone !== prevState.inZone ||
+          updated.lastUpdate !== prevState.lastUpdate
+        ) {
+          next[target.id] = updated;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [bandSnapshots, trainingTargets]);
+
+  const targetMetrics = useMemo(() => {
+    const metrics = {};
+    trainingTargets.forEach((target) => {
+      const state = targetSensitivity[target.id] || { value: 1, inZone: false };
+      const baseTol = typeof target.tolerance === 'number' ? target.tolerance : 0;
+      const effectiveTolerance = state.value > 0 ? baseTol / state.value : baseTol;
+      metrics[target.id] = {
+        sensitivity: state.value,
+        effectiveTolerance,
+        inZone: state.inZone
+      };
+    });
+    return metrics;
+  }, [trainingTargets, targetSensitivity]);
+
+  const targetReadings = useMemo(() => {
+    const snapshotMap = new Map(bandSnapshots.map(s => [s.label, s]));
+    const timestamp = bandSnapshots[0]?.timestamp || Date.now();
+    return trainingTargets.map((target) => {
+      const value = resolveTargetValue(target, snapshotMap);
+      const metric = targetMetrics[target.id];
+      return {
+        id: target.id,
+        label: target.label,
+        model: getTargetModel(target),
+        band: target.band ?? null,
+        numeratorBand: target.numeratorBand ?? null,
+        denominatorBand: target.denominatorBand ?? null,
+        target: target.target,
+        tolerance: metric?.effectiveTolerance ?? target.tolerance ?? 0,
+        value,
+        delta: typeof value === 'number' ? value - target.target : null,
+        inZone: metric?.inZone ?? false,
+        timestamp
+      };
+    });
+  }, [bandSnapshots, trainingTargets, targetMetrics]);
+
+  const effectiveTargets = useMemo(() => (
+    trainingTargets.map((target) => {
+      const metric = targetMetrics[target.id];
+      return {
+        ...target,
+        tolerance: metric ? metric.effectiveTolerance : target.tolerance,
+        baseTolerance: target.tolerance,
+        sensitivity: metric ? metric.sensitivity : 1,
+        inZone: metric ? metric.inZone : false
+      };
+    })
+  ), [trainingTargets, targetMetrics]);
+
+  useEffect(() => {
+    if (effectiveTargets.length === 0) {
+      setTargetHistory({});
+      return;
+    }
+    const now = Date.now();
+    const windowMs = bandWindowSec * 1000;
+    setTargetHistory((prev) => {
+      const next = { ...prev };
+      effectiveTargets.forEach((target) => {
+        if (getTargetModel(target) !== 'relative') return;
+        const label = target.label;
+        const band = target.band;
+        if (!label || !band) return;
+        if (!next[label]) next[label] = {};
+        const series = next[label][band] ? [...next[label][band]] : [];
+        series.push({
+          t: now,
+          target: target.target,
+          tolerance: target.tolerance ?? 0,
+          baseTolerance: target.baseTolerance ?? target.tolerance ?? 0,
+          sensitivity: target.sensitivity ?? 1
+        });
+        next[label][band] = series.filter(p => p.t >= now - windowMs);
+      });
+      return next;
+    });
+  }, [effectiveTargets, bandWindowSec]);
+
+  useEffect(() => {
+    if (effectiveTargets.length === 0) {
+      setTargetHistoryById({});
+      return;
+    }
+    const now = Date.now();
+    const windowMs = bandWindowSec * 1000;
+    setTargetHistoryById((prev) => {
+      const next = { ...prev };
+      const activeIds = new Set(effectiveTargets.map(t => t.id));
+      effectiveTargets.forEach((target) => {
+        const series = next[target.id] ? [...next[target.id]] : [];
+        series.push({
+          t: now,
+          target: target.target,
+          tolerance: target.tolerance ?? 0,
+          baseTolerance: target.baseTolerance ?? target.tolerance ?? 0,
+          sensitivity: target.sensitivity ?? 1
+        });
+        next[target.id] = series.filter(p => p.t >= now - windowMs);
+      });
+      Object.keys(next).forEach((id) => {
+        if (!activeIds.has(id)) delete next[id];
+      });
+      return next;
+    });
+  }, [effectiveTargets, bandWindowSec]);
+
+  const downloadMetadata = useMemo(() => ({
+    trainingTargets: effectiveTargets,
+    targetMetrics,
+    targetHistory,
+    targetHistoryById,
+    targetReadings,
+    config: {
+      bandWindowSec,
+      bandSmoothingSec,
+      deltaSmoothingSec,
+      spectrogramWindowSec,
+      eegTraceWindow,
+      eegFftWindow,
+      ppgTraceWindow,
+      notchHz,
+      spectrogramUseCachedSlices,
+      artifactWindowSec,
+      artifactStepSec,
+      amplitudeRangeThreshold,
+      lineNoiseHz,
+      lineNoiseBandHz,
+      lineNoiseMaxHz,
+      lineNoiseRatioThreshold,
+      rejectionOverlayMode,
+      rejectionOverlayMaxWindows
+    }
+  }), [
+    effectiveTargets,
+    targetMetrics,
+    targetHistory,
+    targetHistoryById,
+    targetReadings,
+    bandWindowSec,
+    bandSmoothingSec,
+    deltaSmoothingSec,
+    spectrogramWindowSec,
+    eegTraceWindow,
+    eegFftWindow,
+    ppgTraceWindow,
+    notchHz,
+    spectrogramUseCachedSlices,
+    artifactWindowSec,
+    artifactStepSec,
+    amplitudeRangeThreshold,
+    lineNoiseHz,
+    lineNoiseBandHz,
+    lineNoiseMaxHz,
+    lineNoiseRatioThreshold,
+    rejectionOverlayMode,
+    rejectionOverlayMaxWindows
+  ]);
+
   function upsertTarget(target) {
     setTrainingTargets(prev => {
       const existingIdx = prev.findIndex(t => t.id === target.id);
@@ -308,6 +784,7 @@ function App() {
     profile.targets.forEach(targetGroup => {
       // Map electrodes to label format used by TrainingControl
       const electrodes = targetGroup.electrodes || [];
+      const model = targetGroup.model || profile.model || 'relative';
       let label;
       if (electrodes.length === 2) {
         // Check for known pairs
@@ -325,16 +802,33 @@ function App() {
         label = 'ALL';
       }
 
-      // Create a target for each band in this electrode group
-      Object.entries(targetGroup.bands).forEach(([band, config]) => {
-        newTargets.push({
-          id: `preset-${profileName}-${label}-${band}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-          label,
-          band,
-          target: config.target,
-          tolerance: config.tolerance
+      if (model === 'ratio') {
+        const ratios = targetGroup.ratios || {};
+        Object.entries(ratios).forEach(([ratioKey, config]) => {
+          if (!config?.numerator || !config?.denominator) return;
+          newTargets.push({
+            id: `preset-${profileName}-${label}-${ratioKey}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            label,
+            model: 'ratio',
+            numeratorBand: config.numerator,
+            denominatorBand: config.denominator,
+            target: config.target,
+            tolerance: config.tolerance
+          });
         });
-      });
+      } else {
+        // Create a target for each band in this electrode group
+        Object.entries(targetGroup.bands || {}).forEach(([band, config]) => {
+          newTargets.push({
+            id: `preset-${profileName}-${label}-${band}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            label,
+            model: 'relative',
+            band,
+            target: config.target,
+            tolerance: config.tolerance
+          });
+        });
+      }
     });
 
     setTrainingTargets(newTargets);
@@ -351,7 +845,6 @@ function App() {
     }
     audioSensitivityRef.current = { value: 1, lastUpdate: Date.now() };
     setAudioSensitivity(1);
-    setAudioSensitivityHistory([{ t: Date.now(), v: 1 }]);
 
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const bufferSize = ctx.sampleRate * 2;
@@ -386,27 +879,7 @@ function App() {
     if (!audioEnabled || trainingTargets.length === 0) return;
     audioSensitivityRef.current = { value: 1, lastUpdate: Date.now() };
     setAudioSensitivity(1);
-    setAudioSensitivityHistory([{ t: Date.now(), v: 1 }]);
   }, [audioEnabled, trainingTargets]);
-
-  useEffect(() => {
-    if (!audioEnabled || trainingTargets.length === 0) {
-      return;
-    }
-    const intervalId = setInterval(() => {
-      const value = audioSensitivityRef.current?.value ?? 1;
-      const now = Date.now();
-      setAudioSensitivityHistory((prev) => {
-        const next = [...prev, { t: now, v: value }];
-        const cutoff = now - 5 * 60 * 1000;
-        while (next.length > 2 && next[0].t < cutoff) {
-          next.shift();
-        }
-        return next;
-      });
-    }, 1000);
-    return () => clearInterval(intervalId);
-  }, [audioEnabled, trainingTargets.length]);
 
   useEffect(() => {
     if (!audioEnabled || !gainRef.current || trainingTargets.length === 0) {
@@ -416,15 +889,16 @@ function App() {
     // compute max distance outside target ranges
     let maxDistance = 0;
     let allMatched = true;
+    const snapshotMap = new Map(bandSnapshots.map(s => [s.label, s]));
     trainingTargets.forEach(target => {
-      const snapshot = bandSnapshots.find(s => s.label === target.label);
-      const current = snapshot?.bands?.[target.band]?.relative;
+      const current = resolveTargetValue(target, snapshotMap);
       if (typeof current !== 'number') {
         allMatched = false;
         return;
       }
       const diff = Math.abs(current - target.target);
-      const over = Math.max(0, diff - target.tolerance);
+      const effectiveTol = targetMetrics[target.id]?.effectiveTolerance ?? target.tolerance ?? 0;
+      const over = Math.max(0, diff - effectiveTol);
       if (over > maxDistance) maxDistance = over;
       if (over > 0) {
         allMatched = false;
@@ -434,18 +908,25 @@ function App() {
     const now = Date.now();
     const sensitivityState = audioSensitivityRef.current;
     const elapsedSec = Math.max(0, (now - sensitivityState.lastUpdate) / 1000);
-    const baseDecayPerSec = 0.003;
-    const matchedDecayPerSec = 0.01;
-    const decay = (allMatched ? matchedDecayPerSec : baseDecayPerSec) * elapsedSec;
-    const nextSensitivity = Math.max(0.2, sensitivityState.value - decay);
+    const baseDecreasePerSec = 0.003;
+    const matchedIncreasePerSec = 0.01;
+    const minAudioSensitivity = 1.0;
+    const maxAudioSensitivity = 2.0;
+    const currentNorm = Math.max(0, Math.min(1, (maxDistance * 5) / sensitivityState.value));
+    const allowIncrease = allMatched && currentNorm <= 0.5;
+    const delta = (allowIncrease ? matchedIncreasePerSec : -baseDecreasePerSec) * elapsedSec;
+    const nextSensitivity = Math.min(
+      maxAudioSensitivity,
+      Math.max(minAudioSensitivity, sensitivityState.value + delta)
+    );
     audioSensitivityRef.current = { value: nextSensitivity, lastUpdate: now };
     setAudioSensitivity(nextSensitivity);
 
-    const norm = Math.max(0, Math.min(1, maxDistance * 5 * nextSensitivity)); // time-dependent sensitivity
+    const norm = Math.max(0, Math.min(1, (maxDistance * 5) / nextSensitivity)); // higher sensitivity reduces feedback
     if (gainRef.current) {
       gainRef.current.gain.setTargetAtTime(norm * 0.2, audioCtxRef.current.currentTime, 0.05);
     }
-  }, [audioEnabled, trainingTargets, bandSnapshots]);
+  }, [audioEnabled, trainingTargets, bandSnapshots, targetMetrics]);
 
   return (
     <div className="app-shell">
@@ -475,31 +956,59 @@ function App() {
           <p>Connect, stream EEG, and preview channels without leaving this dashboard.</p>
           <DeviceControl
             onPeriodgramUpdated={onPeriodgramUpdated}
+            onPpgUpdate={setHeartData}
+            onDeviceDebug={setDeviceDebug}
             selectedChannels={selectedChannels}
             onToggleChannel={onToggleChannel}
             availableChannels={availableChannels}
             lastFFT={lastFFT}
+            traceWindow={eegTraceWindow}
+            fftWindow={eegFftWindow}
+            ppgTraceWindow={ppgTraceWindow}
+            spectrogramWindowSec={spectrogramWindowSec}
+            notchHz={notchHz}
+            downloadMetadata={downloadMetadata}
+            artifactWindowSec={artifactWindowSec}
+            artifactStepSec={artifactStepSec}
+            amplitudeRangeThreshold={amplitudeRangeThreshold}
+            lineNoiseHz={lineNoiseHz}
+            lineNoiseBandHz={lineNoiseBandHz}
+            lineNoiseMaxHz={lineNoiseMaxHz}
+            lineNoiseRatioThreshold={lineNoiseRatioThreshold}
           />
         </div>
       </header>
 
       <main className="content-grid">
         <section className={`panel tall ${fullscreenPanel === 'bandpower' ? 'fullscreen' : ''}`}>
-          <div className="panel-heading">
-            <h3>Band Power Observatory</h3>
-            <span>Alpha / Beta / Gamma with regional deltas</span>
-            <span className={`heartbeat-dot ${lastFFT && (Date.now() - lastFFT) < 5000 ? 'alive' : ''}`}>
-              {lastFFT ? `${Math.round((Date.now() - lastFFT)/1000)}s` : '—'}
-            </span>
-            <div className="panel-controls">
-              <button type="button" onClick={() => setShowBandPower(v => !v)}>
-                {showBandPower ? 'Hide' : 'Show'}
-              </button>
-              <button type="button" onClick={() => setFullscreenPanel(prev => prev === 'bandpower' ? null : 'bandpower')}>
-                {fullscreenPanel === 'bandpower' ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
-            </div>
-          </div>
+          <PanelHeading
+            title="Band Power Observatory"
+            subtitle="Alpha / Beta / Gamma with regional deltas"
+            indicator={(
+              <span className={`heartbeat-dot ${lastFFT && (Date.now() - lastFFT) < 5000 ? 'alive' : ''}`}>
+                {lastFFT ? `${Math.round((Date.now() - lastFFT) / 1000)}s` : '—'}
+              </span>
+            )}
+          >
+            <PanelControls>
+              <PanelControlButton
+                pressed={showBandPower}
+                ariaLabel={showBandPower ? 'Hide band power' : 'Show band power'}
+                title={showBandPower ? 'Hide band power' : 'Show band power'}
+                onClick={() => setShowBandPower(v => !v)}
+              >
+                {showBandPower ? controlIcons.hide : controlIcons.show}
+              </PanelControlButton>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'bandpower'}
+                ariaLabel={fullscreenPanel === 'bandpower' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'bandpower' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'bandpower' ? null : 'bandpower')}
+              >
+                {fullscreenPanel === 'bandpower' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
           <p className="subdued">
             Toggle into band views to compare electrodes, see averaged periodograms, and spot left/right imbalances.
             Targets (if defined) are shaded on each band line; a preview appears when no live data is available.
@@ -507,55 +1016,120 @@ function App() {
           {showBandPower && (
             <BandPower
               bandHistory={bandHistory}
-              trainingTargets={trainingTargets}
+              trainingTargets={effectiveTargets}
+              targetHistory={targetHistory}
               windowSeconds={bandWindowSec}
             />
           )}
         </section>
 
         <section className={`panel ${fullscreenPanel === 'training' ? 'fullscreen' : ''}`}>
-          <div className="panel-heading">
-            <h3>Training Console</h3>
-            <span>Targets & feedback</span>
-            <div className="panel-controls">
-              <button type="button" onClick={() => setFullscreenPanel(prev => prev === 'training' ? null : 'training')}>
-                {fullscreenPanel === 'training' ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
-            </div>
-          </div>
+          <PanelHeading title="Training Console" subtitle="Targets & feedback">
+            <PanelControls>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'training'}
+                ariaLabel={fullscreenPanel === 'training' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'training' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'training' ? null : 'training')}
+              >
+                {fullscreenPanel === 'training' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
           <p className="subdued">Select targets, pick a feedback mode, and monitor how often you stay in the pocket.</p>
           <TrainingControl
             availableChannels={availableChannels}
             selectedTargets={trainingTargets}
             bandSnapshots={bandSnapshots}
             bandHistory={bandHistory}
+            targetHistoryById={targetHistoryById}
             deltaSmoothingSec={deltaSmoothingSec}
             onSaveTarget={upsertTarget}
             onDeleteTarget={deleteTarget}
             audioEnabled={audioEnabled}
-            audioSensitivity={audioSensitivity}
-            audioSensitivityHistory={audioSensitivityHistory}
             onToggleAudio={setAudioEnabled}
             presets={bandTargetPresets.profiles || []}
             presetsLoading={presetsLoading}
             presetsError={presetsError}
             onApplyPreset={applyPreset}
             onClearTargets={clearAllTargets}
+            targetMetrics={targetMetrics}
           />
           <TrainingView />
         </section>
 
-        <section className={`panel ${fullscreenPanel === 'config' ? 'fullscreen' : ''}`}>
-          <div className="panel-heading">
-            <h3>Configuration</h3>
-            <span>Display windows</span>
-            <div className="panel-controls">
-              <button type="button" onClick={() => setFullscreenPanel(prev => prev === 'config' ? null : 'config')}>
-                {fullscreenPanel === 'config' ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
-            </div>
+        <section className={`panel ${fullscreenPanel === 'heart' ? 'fullscreen' : ''}`}>
+          <PanelHeading title="Heart Observatory" subtitle="Derived from PPG">
+            <PanelControls>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'heart'}
+                ariaLabel={fullscreenPanel === 'heart' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'heart' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'heart' ? null : 'heart')}
+              >
+                {fullscreenPanel === 'heart' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
+          <p className="subdued">Combined PPG pulse trace with a live heart rate estimate.</p>
+          <div className="inline-status" style={{ marginBottom: 10 }}>
+            <span className="status-pill">
+              Heart rate: {heartData.heartRateBpm != null ? `${heartData.heartRateBpm} bpm` : '—'}
+            </span>
+            <span className="status-pill">
+              PPG: {heartData.ppgChannels?.length ? heartData.ppgChannels.map(c => c.label).join(' + ') : '—'}
+            </span>
           </div>
+          {heartData.combinedPpg ? (
+            <>
+              <div className="chart-block" style={{ marginBottom: 10 }}>
+                <p className="chart-label">PPG combined</p>
+                <EEGTraceChart
+                  samples={heartData.combinedPpg.samples}
+                  height={220}
+                  maxPoints={2400}
+                />
+              </div>
+              <div className="chart-block" style={{ marginBottom: 10 }}>
+                <p className="chart-label">Cardiogram (last 5 beats)</p>
+                {heartData.cardiogramPpg ? (
+                  <EEGTraceChart
+                    samples={heartData.cardiogramPpg.samples}
+                    height={180}
+                    maxPoints={1800}
+                  />
+                ) : (
+                  <p className="subdued">Waiting for cardiogram samples.</p>
+                )}
+              </div>
+              <div className="chart-block">
+                <p className="chart-label">Heart rate (15s average)</p>
+                <TimeSeriesLineChart points={heartRateHistory} windowSec={300} height={160} />
+              </div>
+            </>
+          ) : (
+            <p className="subdued">Waiting for PPG data.</p>
+          )}
+        </section>
+
+        <section className={`panel ${fullscreenPanel === 'config' ? 'fullscreen' : ''}`}>
+          <PanelHeading title="Configuration" subtitle="Display windows">
+            <PanelControls>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'config'}
+                ariaLabel={fullscreenPanel === 'config' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'config' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'config' ? null : 'config')}
+              >
+                {fullscreenPanel === 'config' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
           <p className="subdued">Adjust how many seconds of history are rendered for band power and spectrograms.</p>
+          <div className="inline-buttons" style={{ marginBottom: 12 }}>
+            <button type="button" onClick={handleSaveSettings}>Save</button>
+            <button type="button" onClick={handleResetDefaults}>Defaults</button>
+          </div>
           <div className="inline-buttons">
             <label className="field">
               <span>Band power window (s)</span>
@@ -600,25 +1174,231 @@ function App() {
                 onChange={(e) => setDeltaSmoothingSec(Math.max(1, Math.min(900, Number(e.target.value))))}
               />
             </label>
+            <label className="field">
+              <span>Notch filter Hz</span>
+              <select
+                value={notchHz}
+                onChange={(e) => setNotchHz(Number(e.target.value))}
+              >
+                <option value={50}>50 Hz</option>
+                <option value={60}>60 Hz</option>
+              </select>
+            </label>
+          </div>
+          <p className="subdued">Tune buffer sizes for trace rendering and FFT processing.</p>
+          <div className="inline-buttons">
+            <label className="field">
+              <span>EEG trace window (samples)</span>
+              <input
+                type="number"
+                min="512"
+                max="16384"
+                value={eegTraceWindow}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setEegTraceWindow(Math.max(eegFftWindow, Math.min(16384, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>EEG FFT window (samples)</span>
+              <input
+                type="number"
+                min="256"
+                max="4096"
+                value={eegFftWindow}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setEegFftWindow(Math.max(256, Math.min(4096, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>PPG trace window (samples)</span>
+              <input
+                type="number"
+                min="256"
+                max="4096"
+                value={ppgTraceWindow}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setPpgTraceWindow(Math.max(256, Math.min(4096, val)));
+                }}
+              />
+            </label>
+          </div>
+          <p className="subdued">Artifact detection uses amplitude range and line-noise ratios.</p>
+          <div className="inline-buttons">
+            <label className="field">
+              <span>Artifact window (s)</span>
+              <input
+                type="number"
+                min="0.5"
+                max="10"
+                step="0.5"
+                value={artifactWindowSec}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setArtifactWindowSec(Math.max(0.5, Math.min(10, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Artifact step (s)</span>
+              <input
+                type="number"
+                min="0.25"
+                max="5"
+                step="0.25"
+                value={artifactStepSec}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setArtifactStepSec(Math.max(0.25, Math.min(5, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Amplitude range threshold</span>
+              <input
+                type="number"
+                min="10"
+                max="500"
+                step="5"
+                value={amplitudeRangeThreshold}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setAmplitudeRangeThreshold(Math.max(10, Math.min(500, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Line-noise ratio threshold</span>
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                value={lineNoiseRatioThreshold}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setLineNoiseRatioThreshold(Math.max(0, Math.min(1, val)));
+                }}
+              />
+            </label>
+          </div>
+          <div className="inline-buttons">
+            <label className="field">
+              <span>Line-noise Hz</span>
+              <input
+                type="number"
+                min="50"
+                max="70"
+                step="1"
+                value={lineNoiseHz}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setLineNoiseHz(Math.max(50, Math.min(70, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Line-noise band (Hz)</span>
+              <input
+                type="number"
+                min="0.5"
+                max="6"
+                step="0.5"
+                value={lineNoiseBandHz}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setLineNoiseBandHz(Math.max(0.5, Math.min(6, val)));
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Line-noise max Hz</span>
+              <input
+                type="number"
+                min="20"
+                max="120"
+                step="5"
+                value={lineNoiseMaxHz}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setLineNoiseMaxHz(Math.max(20, Math.min(120, val)));
+                }}
+              />
+            </label>
+          </div>
+          <div className="inline-buttons">
+            <label className="field">
+              <span>Rejection overlay mode</span>
+              <select
+                value={rejectionOverlayMode}
+                onChange={(e) => setRejectionOverlayMode(e.target.value)}
+              >
+                <option value="auto">auto</option>
+                <option value="always">always</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Overlay max windows</span>
+              <input
+                type="number"
+                min="20"
+                max="1000"
+                step="10"
+                value={rejectionOverlayMaxWindows}
+                onChange={(e) => {
+                  const val = e.target.valueAsNumber;
+                  if (Number.isNaN(val)) return;
+                  setRejectionOverlayMaxWindows(Math.max(20, Math.min(1000, val)));
+                }}
+              />
+            </label>
           </div>
         </section>
 
         <section className={`panel ${fullscreenPanel === 'periodograms' ? 'fullscreen' : ''}`}>
-          <div className="panel-heading">
-            <h3>Band Periodograms</h3>
-            <span>Per-channel spectra (weighted selection)</span>
-            <span className={`heartbeat-dot ${lastFFT && (Date.now() - lastFFT) < 5000 ? 'alive' : ''}`}>
-              {lastFFT ? `${Math.round((Date.now() - lastFFT)/1000)}s` : '—'}
-            </span>
-            <div className="panel-controls">
-              <button type="button" onClick={() => setShowPeriodograms(v => !v)}>
-                {showPeriodograms ? 'Hide' : 'Show'}
-              </button>
-              <button type="button" onClick={() => setFullscreenPanel(prev => prev === 'periodograms' ? null : 'periodograms')}>
-                {fullscreenPanel === 'periodograms' ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
-            </div>
-          </div>
+          <PanelHeading
+            title="Band Periodograms"
+            subtitle="Per-channel spectra (weighted selection)"
+            indicator={(
+              <span className={`heartbeat-dot ${lastFFT && (Date.now() - lastFFT) < 5000 ? 'alive' : ''}`}>
+                {lastFFT ? `${Math.round((Date.now() - lastFFT) / 1000)}s` : '—'}
+              </span>
+            )}
+          >
+            <PanelControls>
+              <PanelControlButton
+                pressed={showPeriodograms}
+                ariaLabel={showPeriodograms ? 'Hide periodograms' : 'Show periodograms'}
+                title={showPeriodograms ? 'Hide periodograms' : 'Show periodograms'}
+                onClick={() => setShowPeriodograms(v => !v)}
+              >
+                {showPeriodograms ? controlIcons.hide : controlIcons.show}
+              </PanelControlButton>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'periodograms'}
+                ariaLabel={fullscreenPanel === 'periodograms' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'periodograms' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'periodograms' ? null : 'periodograms')}
+              >
+                {fullscreenPanel === 'periodograms' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
           <p className="subdued">Live per-channel periodograms up to 50 Hz (uses selected sensors).</p>
           {showPeriodograms && (
             <BandPeriodograms eegData={filteredEegData} selectedChannels={selectedChannels} />
@@ -626,24 +1406,178 @@ function App() {
         </section>
 
         <section className={`panel tall ${fullscreenPanel === 'spectrogram' ? 'fullscreen' : ''}`}>
-          <div className="panel-heading">
-            <h3>Spectrogram</h3>
-            <span>Per-channel heatmaps</span>
-            <span className={`heartbeat-dot ${lastFFT && (Date.now() - lastFFT) < 5000 ? 'alive' : ''}`}>
-              {lastFFT ? `${Math.round((Date.now() - lastFFT)/1000)}s` : '—'}
-            </span>
-            <div className="panel-controls">
-              <button type="button" onClick={() => setShowSpectrogram(v => !v)}>
-                {showSpectrogram ? 'Hide' : 'Show'}
-              </button>
-              <button type="button" onClick={() => setFullscreenPanel(prev => prev === 'spectrogram' ? null : 'spectrogram')}>
-                {fullscreenPanel === 'spectrogram' ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
-            </div>
-          </div>
+          <PanelHeading
+            title="Spectrogram"
+            subtitle="Per-channel heatmaps"
+            indicator={(
+              <span className={`heartbeat-dot ${lastFFT && (Date.now() - lastFFT) < 5000 ? 'alive' : ''}`}>
+                {lastFFT ? `${Math.round((Date.now() - lastFFT) / 1000)}s` : '—'}
+              </span>
+            )}
+          >
+            <PanelControls>
+              <label className="panel-toggle">
+                <input
+                  type="checkbox"
+                  checked={spectrogramUseCachedSlices}
+                  onChange={(e) => setSpectrogramUseCachedSlices(e.target.checked)}
+                />
+                <span>Cached FFT</span>
+              </label>
+              <PanelControlButton
+                pressed={showSpectrogram}
+                ariaLabel={showSpectrogram ? 'Hide spectrogram' : 'Show spectrogram'}
+                title={showSpectrogram ? 'Hide spectrogram' : 'Show spectrogram'}
+                onClick={() => setShowSpectrogram(v => !v)}
+              >
+                {showSpectrogram ? controlIcons.hide : controlIcons.show}
+              </PanelControlButton>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'spectrogram'}
+                ariaLabel={fullscreenPanel === 'spectrogram' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'spectrogram' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'spectrogram' ? null : 'spectrogram')}
+              >
+                {fullscreenPanel === 'spectrogram' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
           <p className="subdued">Live per-channel spectrograms up to 50 Hz, honoring your sensor selection.</p>
           {showSpectrogram && (
-            <Spectrogram eegData={filteredEegData} selectedChannels={selectedChannels} windowSeconds={spectrogramWindowSec} />
+            <Spectrogram
+              eegData={filteredEegData}
+              selectedChannels={selectedChannels}
+              windowSeconds={spectrogramWindowSec}
+              preferCachedSlices={spectrogramUseCachedSlices}
+            />
+          )}
+        </section>
+
+        <section className={`panel ${fullscreenPanel === 'device-debug' ? 'fullscreen' : ''}`}>
+          <PanelHeading title="Device Debug" subtitle="Connection + telemetry log">
+            <PanelControls>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'device-debug'}
+                ariaLabel={fullscreenPanel === 'device-debug' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'device-debug' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'device-debug' ? null : 'device-debug')}
+              >
+                {fullscreenPanel === 'device-debug' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
+          <p className="subdued">Full device diagnostics for troubleshooting disconnects and data flow.</p>
+          {deviceDebug ? (
+            <>
+              {deviceDebug.statusLog?.length > 0 ? (
+                <pre className="debug-pre">
+                  {deviceDebug.statusLog
+                    .map((entry) => `${new Date(entry.t).toISOString()} | ${entry.status} | ${entry.message}`)
+                    .join('\n')}
+                </pre>
+              ) : (
+                <p className="subdued">No connection events yet.</p>
+              )}
+            </>
+          ) : (
+            <p className="subdued">Waiting for device status.</p>
+          )}
+        </section>
+
+        <section className={`panel tall ${fullscreenPanel === 'artifacts' ? 'fullscreen' : ''}`}>
+          <PanelHeading title="Artifact Rejection Diagnostics" subtitle="Amplitude range + line noise">
+            <PanelControls>
+              <PanelControlButton
+                pressed={showArtifactDiagnostics}
+                ariaLabel={showArtifactDiagnostics ? 'Hide artifact diagnostics' : 'Show artifact diagnostics'}
+                title={showArtifactDiagnostics ? 'Hide artifact diagnostics' : 'Show artifact diagnostics'}
+                onClick={() => setShowArtifactDiagnostics(v => !v)}
+              >
+                {showArtifactDiagnostics ? controlIcons.hide : controlIcons.show}
+              </PanelControlButton>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'artifacts'}
+                ariaLabel={fullscreenPanel === 'artifacts' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'artifacts' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'artifacts' ? null : 'artifacts')}
+              >
+                {fullscreenPanel === 'artifacts' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
+          <p className="subdued">
+            Each trace is shaded where amplitude range or line noise exceeds the configured thresholds.
+          </p>
+          {showArtifactDiagnostics && (
+            artifactChannels.length > 0 ? (
+              <div className="channel-grid">
+                {artifactChannels.map((channel) => {
+                  const windows = channel.artifactWindows || [];
+                  const overlayMode = String(rejectionOverlayMode || 'auto').toLowerCase();
+                  const overlayOk = overlayMode === 'always'
+                    || (overlayMode === 'auto' && windows.length <= rejectionOverlayMaxWindows);
+                  const overlays = overlayOk
+                    ? windows
+                      .filter(w => w.amplitudeArtifact || w.lineNoiseArtifact)
+                      .map((w) => {
+                        let color = '#f97316';
+                        if (w.amplitudeArtifact && w.lineNoiseArtifact) {
+                          color = '#ef4444';
+                        } else if (w.lineNoiseArtifact) {
+                          color = '#60a5fa';
+                        }
+                        return {
+                          start: w.startSample,
+                          end: w.endSample,
+                          color
+                        };
+                      })
+                    : [];
+                  const amplitudeHits = windows.filter(w => w.amplitudeArtifact).length;
+                  const lineNoiseHits = windows.filter(w => w.lineNoiseArtifact).length;
+                  const bothHits = windows.filter(w => w.amplitudeArtifact && w.lineNoiseArtifact).length;
+                  const latest = channel.latest;
+                  return (
+                    <div className="channel-card" key={channel.label}>
+                      <div className="channel-header">
+                        <div>
+                          <p className="eyebrow">{channel.label}</p>
+                          <p className="channel-meta">
+                            Windows: {windows.length} • amplitude hits: {amplitudeHits} • line-noise hits: {lineNoiseHits} • both: {bothHits}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="inline-status">
+                        <span className={`status-pill ${latest?.amplitudeArtifact ? 'warn' : ''}`}>
+                          Amplitude range: {latest ? latest.amplitudeRange.toFixed(1) : '—'} (thr {amplitudeRangeThreshold})
+                        </span>
+                        <span className={`status-pill ${latest?.lineNoiseArtifact ? 'warn' : ''}`}>
+                          Line-noise ratio: {latest ? latest.lineNoiseRatio.toFixed(3) : '—'} (thr {lineNoiseRatioThreshold})
+                        </span>
+                        {!overlayOk && (
+                          <span className="status-pill">Overlays off (windows {windows.length})</span>
+                        )}
+                      </div>
+                      <div className="chart-block">
+                        <p className="chart-label">EEG trace (last {eegTraceWindow} samples)</p>
+                        {channel.samples.length > 0 ? (
+                          <EEGTraceChart
+                            samples={channel.samples}
+                            overlays={overlays}
+                            height={140}
+                            maxPoints={1200}
+                          />
+                        ) : (
+                          <p className="subdued">No samples yet.</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="subdued">Waiting for EEG samples.</p>
+            )
           )}
         </section>
       </main>

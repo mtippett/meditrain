@@ -6,7 +6,7 @@ import React, { useMemo } from 'react';
  * - Automatically downsamples large arrays for performance.
  * - Scales to the parent width via viewBox; height is explicit.
  */
-function EEGTraceChart({ samples = [], height = 80, maxPoints = 800 }) {
+function EEGTraceChart({ samples = [], height = 80, maxPoints = 800, overlays = [], overlayAlpha = 0.2 }) {
   const trace = useMemo(() => {
     if (!samples || samples.length === 0) return null;
 
@@ -46,6 +46,14 @@ function EEGTraceChart({ samples = [], height = 80, maxPoints = 800 }) {
   const innerWidth = Math.max(1, trace.width);
   const innerHeight = Math.max(1, height - marginBottom);
 
+  const normalizedOverlays = overlays
+    .filter(o => Number.isFinite(o.start) && Number.isFinite(o.end) && o.end > o.start)
+    .map((o) => {
+      const start = Math.max(0, Math.min(innerWidth, o.start));
+      const end = Math.max(0, Math.min(innerWidth, o.end));
+      return { ...o, start, end };
+    });
+
   return (
     <svg
       width="100%"
@@ -54,6 +62,17 @@ function EEGTraceChart({ samples = [], height = 80, maxPoints = 800 }) {
       preserveAspectRatio="none"
     >
       <g transform={`translate(${marginLeft}, 0)`}>
+        {normalizedOverlays.map((o, idx) => (
+          <rect
+            key={`${o.start}-${o.end}-${idx}`}
+            x={o.start}
+            y="0"
+            width={Math.max(1, o.end - o.start)}
+            height={innerHeight}
+            fill={o.color || '#f97316'}
+            opacity={overlayAlpha}
+          />
+        ))}
         <polyline
           fill="none"
           stroke="#4ade80"

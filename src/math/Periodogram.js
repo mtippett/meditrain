@@ -47,23 +47,25 @@ export function averagedPeriodogram(periodograms) {
   return averagedPeriodogram;
 }
 
-export function filterEEGData(eegData) {
+export function filterEEGData(eegData, notchHz = 60, samplingRate = 256) {
   if (!eegData || eegData.length === 0) return eegData;
   // Detrend (remove mean) and notch mains
   const mean = eegData.reduce((s, v) => s + v, 0) / eegData.length;
   const centered = eegData.map(v => v - mean);
-  return notchFilter(centered);
+  return notchFilter(centered, notchHz, samplingRate, 30);
 }
 
 // Returns one-sided PSD estimate (Welch-style single segment with Hann), units: power/bin normalized by fs
-export function calcPeriodogram(eegData) {
-  const samplingRate = 256;
+function calcPeriodogramCore(eegData, samplingRate = 256, applyNotch = true, notchHz = 60) {
   const N = eegData.length;
   if (!N) return { frequencies: [], magnitudes: [] };
 
+  const mean = eegData.reduce((s, v) => s + v, 0) / N;
+  const centered = eegData.map(v => v - mean);
   const window = hannWindow(N);
   const windowPower = window.reduce((s, v) => s + v * v, 0) / N;
-  const windowed = filterEEGData(eegData).map((v, i) => v * window[i]);
+  const filtered = applyNotch ? notchFilter(centered, notchHz, samplingRate, 30) : centered;
+  const windowed = filtered.map((v, i) => v * window[i]);
 
   const phasors = fft(windowed);
   const freqs = fftUtil.fftFreq(phasors, samplingRate);
@@ -80,4 +82,12 @@ export function calcPeriodogram(eegData) {
   }
 
   return { frequencies: freqOut, magnitudes: psd };
+}
+
+export function calcPeriodogram(eegData, samplingRate = 256, notchHz = 60) {
+  return calcPeriodogramCore(eegData, samplingRate, true, notchHz);
+}
+
+export function calcRawPeriodogram(eegData, samplingRate = 256) {
+  return calcPeriodogramCore(eegData, samplingRate, false);
 }

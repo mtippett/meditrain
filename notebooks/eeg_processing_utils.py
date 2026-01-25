@@ -23,8 +23,11 @@ from scipy import signal
 
 # Defaults (callers can override module globals if desired)
 DEFAULT_FS = 256
+LINE_NOISE_HZ = 60
+PSD_AVERAGE = "median"
 NPERSEG = 1024
 NOVERLAP = NPERSEG // 2
+SPECTROGRAM_NFFT = 4096
 
 BANDS = [
     {"key": "delta", "label": "Delta", "min": 0.5, "max": 4},
@@ -38,12 +41,30 @@ BANDS = [
 def _get_time_range_str(diag_df: pd.DataFrame) -> str | None:
     if diag_df is None or "captured_at" not in diag_df.columns:
         return None
+    import tzlocal
+
     captured_at = pd.to_datetime(diag_df["captured_at"], errors="coerce", utc=True)
-    if captured_at.notna().any():
-        min_ts = captured_at.min().strftime('%Y-%m-%d %H:%M:%S UTC')
-        max_ts = captured_at.max().strftime('%Y-%m-%d %H:%M:%S UTC')
-        return f"Data captured from {min_ts} to {max_ts}"
-    return None
+    capture_ended_at = (
+        pd.to_datetime(diag_df["capture_ended_at"], errors="coerce", utc=True)
+        if "capture_ended_at" in diag_df.columns
+        else pd.Series(pd.DatetimeIndex([], tz="UTC"))
+    )
+    if not captured_at.notna().any():
+        return None
+
+    local_tz = tzlocal.get_localzone()
+    captured_local = captured_at.dt.tz_convert(local_tz)
+    capture_ended_local = capture_ended_at.dt.tz_convert(local_tz)
+
+    start_ts = captured_local.min()
+    if capture_ended_local.notna().any():
+        end_ts = capture_ended_local.max()
+    else:
+        end_ts = captured_local.max()
+
+    min_ts = start_ts.strftime('%Y-%m-%d %H:%M:%S %Z')
+    max_ts = end_ts.strftime('%Y-%m-%d %H:%M:%S %Z')
+    return f"Data captured from {min_ts} to {max_ts}"
 
 
 def notch_filter(samples: np.ndarray, f0: float = 60.0, fs: float = DEFAULT_FS, q: float = 30.0) -> np.ndarray:
@@ -73,7 +94,7 @@ def bandpass_filter(
         return signal.sosfilt(sos, samples)
 
 
-def compute_psd(samples: Iterable[float], fs: float = DEFAULT_FS) -> tuple[np.ndarray, np.ndarray]:
+def compute_psd(samples: Iterable[float], fs: float = DEFAULT_FS, average: str | None = None) -> tuple[np.ndarray, np.ndarray]:
     samples = np.asarray(samples, dtype=float)
     if samples.size == 0:
         return np.array([]), np.array([])
@@ -83,7 +104,8 @@ def compute_psd(samples: Iterable[float], fs: float = DEFAULT_FS) -> tuple[np.nd
     # - zero-phase bandpass in the analysis range
     # - mains notch to reduce spectral leakage into nearby bins
     samples = bandpass_filter(samples, low_hz=0.5, high_hz=50.0, fs=fs)
-    samples = notch_filter(samples, fs=fs)
+    samples = notch_filter(samples, f0=LINE_NOISE_HZ, fs=fs)
+    avg = average or PSD_AVERAGE
     freqs, psd = signal.welch(
         samples,
         fs=fs,
@@ -92,10 +114,55 @@ def compute_psd(samples: Iterable[float], fs: float = DEFAULT_FS) -> tuple[np.nd
         noverlap=NOVERLAP,
         detrend=False,
         scaling="density",
-        average="mean",
+        average=avg,
     )
     mask = freqs <= 50
     return freqs[mask], psd[mask]
+
+
+def _prepare_psd_samples(samples: Iterable[float], fs: float) -> np.ndarray:
+    samples = np.asarray(samples, dtype=float)
+    if samples.size == 0:
+        return samples
+    samples = samples - samples.mean()
+    samples = bandpass_filter(samples, low_hz=0.5, high_hz=50.0, fs=fs)
+    samples = notch_filter(samples, f0=LINE_NOISE_HZ, fs=fs)
+    return samples
+
+
+def compute_spectrogram_psd(
+    samples: Iterable[float],
+    fs: float,
+    *,
+    nperseg: int = NPERSEG,
+    noverlap: int = NOVERLAP,
+    nfft: int | None = SPECTROGRAM_NFFT,
+    max_freq_hz: float = 50.0,
+    apply_filters: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    samples_arr = np.asarray(samples, dtype=float)
+    if samples_arr.size < nperseg:
+        return None
+    if apply_filters:
+        samples_arr = _prepare_psd_samples(samples_arr, fs)
+    nfft_effective = None
+    if nfft is not None:
+        nfft_effective = int(max(nfft, nperseg))
+    freqs, times, psd = signal.spectrogram(
+        samples_arr,
+        fs=fs,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        nfft=nfft_effective,
+        detrend=False,
+        scaling="density",
+        mode="psd",
+    )
+    mask = freqs <= max_freq_hz
+    if not np.any(mask):
+        return None
+    return freqs[mask], times, psd[mask]
 
 
 def band_powers(freqs: np.ndarray, psd: np.ndarray) -> dict[str, dict[str, float]]:
@@ -110,6 +177,418 @@ def band_powers(freqs: np.ndarray, psd: np.ndarray) -> dict[str, dict[str, float
         for key in totals:
             totals[key]["relative"] = totals[key]["absolute"] / total_power
     return totals
+
+
+def extract_target_history(exports: list[dict]) -> dict[str, dict[str, list[dict]]]:
+    history: dict[str, dict[str, list[dict]]] = {}
+    for export in exports or []:
+        sidecar = export.get("_sidecar") or {}
+        raw_history = sidecar.get("TrainingTargetHistory") or sidecar.get("TargetHistory") or {}
+        if not isinstance(raw_history, dict):
+            continue
+        for label, band_map in raw_history.items():
+            if not isinstance(band_map, dict):
+                continue
+            for band, entries in band_map.items():
+                if not isinstance(entries, list):
+                    continue
+                history.setdefault(label, {}).setdefault(band, []).extend(entries)
+    return history
+
+
+def _normalize_target_history(entries: list[dict]) -> pd.DataFrame:
+    if not entries:
+        return pd.DataFrame(columns=["timestamp", "target", "tolerance", "sensitivity"])
+    rows = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        t_raw = entry.get("t")
+        if t_raw is None:
+            continue
+        if isinstance(t_raw, (int, float)) and not isinstance(t_raw, bool):
+            ts = pd.to_datetime(t_raw, unit="ms", errors="coerce", utc=True)
+        else:
+            ts = pd.to_datetime(t_raw, errors="coerce", utc=True)
+        if pd.isna(ts):
+            continue
+        rows.append(
+            {
+                "timestamp": ts,
+                "target": float(entry.get("target") or 0.0),
+                "tolerance": float(entry.get("tolerance") or 0.0),
+                "sensitivity": float(entry.get("sensitivity") or 1.0),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["timestamp", "target", "tolerance", "sensitivity"])
+    df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+    return df
+
+
+def compute_line_noise_ratio(
+    samples: Iterable[float],
+    fs: float = DEFAULT_FS,
+    line_freq: float = 60.0,
+    band_hz: float = 2.0,
+    max_hz: float | None = 80.0,
+) -> float:
+    samples = np.asarray(samples, dtype=float)
+    if samples.size < 8:
+        return float("nan")
+    samples = samples - samples.mean()
+    nperseg = min(NPERSEG, samples.size)
+    if nperseg < 8:
+        return float("nan")
+    noverlap = min(NOVERLAP, nperseg // 2)
+    freqs, psd = signal.welch(
+        samples,
+        fs=fs,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        detrend=False,
+        scaling="density",
+        average="mean",
+    )
+    if max_hz is not None:
+        mask = freqs <= max_hz
+        freqs = freqs[mask]
+        psd = psd[mask]
+    if freqs.size == 0:
+        return float("nan")
+    half_band = max(0.1, band_hz / 2.0)
+    line_mask = (freqs >= (line_freq - half_band)) & (freqs <= (line_freq + half_band))
+    total_mask = freqs >= 0.5
+    total_power = float(np.trapezoid(psd[total_mask], freqs[total_mask])) if np.any(total_mask) else 0.0
+    line_power = float(np.trapezoid(psd[line_mask], freqs[line_mask])) if np.any(line_mask) else 0.0
+    if total_power <= 0:
+        return 0.0
+    return line_power / total_power
+
+
+def compute_artifact_metrics(
+    samples: Iterable[float],
+    fs: float,
+    window_sec: float = 2.0,
+    step_sec: float = 1.0,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = 60.0,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+    timestamps: Iterable | None = None,
+) -> pd.DataFrame:
+    samples = np.asarray(samples, dtype=float)
+    ts_list = None
+    if timestamps is not None:
+        ts_series = pd.to_datetime(pd.Series(timestamps), errors="coerce", utc=True)
+        if ts_series.notna().any():
+            ts_list = ts_series.reset_index(drop=True)
+    window_samples = max(1, int(round(window_sec * fs)))
+    step_samples = max(1, int(round(step_sec * fs)))
+    if samples.size < window_samples:
+        return pd.DataFrame(
+            columns=[
+                "t_sec",
+                "timestamp",
+                "amplitude_range",
+                "line_noise_ratio",
+                "amplitude_artifact",
+                "line_noise_artifact",
+                "artifact",
+            ]
+        )
+
+    rows = []
+    for start in range(0, samples.size - window_samples + 1, step_samples):
+        window = samples[start:start + window_samples]
+        amplitude_range = float(np.ptp(window))
+        line_noise_ratio = compute_line_noise_ratio(
+            window,
+            fs=fs,
+            line_freq=line_noise_hz,
+            band_hz=line_noise_band_hz,
+            max_hz=line_noise_max_hz,
+        )
+        amplitude_artifact = (
+            amplitude_range_threshold is not None and amplitude_range > amplitude_range_threshold
+        )
+        line_noise_artifact = (
+            line_noise_ratio_threshold is not None and line_noise_ratio > line_noise_ratio_threshold
+        )
+        mid_idx = start + (window_samples // 2)
+        ts_mid = None
+        if ts_list is not None and mid_idx < len(ts_list):
+            ts_mid = ts_list.iloc[mid_idx]
+        rows.append(
+            {
+                "t_sec": (start + window_samples) / fs,
+                "timestamp": ts_mid,
+                "amplitude_range": amplitude_range,
+                "line_noise_ratio": line_noise_ratio,
+                "amplitude_artifact": amplitude_artifact,
+                "line_noise_artifact": line_noise_artifact,
+                "artifact": amplitude_artifact or line_noise_artifact,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def compute_artifact_metrics_for_label(
+    exports: list[dict],
+    target_label: str,
+    window_sec: float = 2.0,
+    step_sec: float = 1.0,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = 60.0,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+) -> pd.DataFrame:
+    df = load_label_timeseries(exports, target_label)
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "t_sec",
+                "timestamp",
+                "amplitude_range",
+                "line_noise_ratio",
+                "amplitude_artifact",
+                "line_noise_artifact",
+                "artifact",
+            ]
+        )
+    fs = float(df["sampling_rate_hz"].iloc[0])
+    return compute_artifact_metrics(
+        df["sample"].to_numpy(dtype=float),
+        fs=fs,
+        window_sec=window_sec,
+        step_sec=step_sec,
+        amplitude_range_threshold=amplitude_range_threshold,
+        line_noise_ratio_threshold=line_noise_ratio_threshold,
+        line_noise_hz=line_noise_hz,
+        line_noise_band_hz=line_noise_band_hz,
+        line_noise_max_hz=line_noise_max_hz,
+        timestamps=(df["timestamp"] if "timestamp" in df.columns else None),
+    )
+
+
+def compute_artifact_df(
+    exports: list[dict],
+    diag_df: pd.DataFrame,
+    *,
+    labels: list[str] | None = None,
+    window_sec: float = 2.0,
+    step_sec: float = 1.0,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = 60.0,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+) -> tuple[pd.DataFrame, list[str], dict[str, pd.DataFrame]]:
+    labels = labels or get_channel_labels(diag_df)
+    artifact_frames = []
+    series_by_label: dict[str, pd.DataFrame] = {}
+    for label in labels:
+        ts_df = load_label_timeseries(exports, label)
+        if ts_df.empty:
+            continue
+        series_by_label[label] = ts_df
+        fs = float(ts_df["sampling_rate_hz"].iloc[0])
+        metrics = compute_artifact_metrics(
+            ts_df["sample"].to_numpy(dtype=float),
+            fs=fs,
+            window_sec=window_sec,
+            step_sec=step_sec,
+            amplitude_range_threshold=amplitude_range_threshold,
+            line_noise_ratio_threshold=line_noise_ratio_threshold,
+            line_noise_hz=line_noise_hz,
+            line_noise_band_hz=line_noise_band_hz,
+            line_noise_max_hz=line_noise_max_hz,
+            timestamps=(ts_df["timestamp"] if "timestamp" in ts_df.columns else None),
+        )
+        if metrics.empty:
+            continue
+        metrics["label"] = label
+        artifact_frames.append(metrics)
+    artifact_df = pd.concat(artifact_frames, ignore_index=True) if artifact_frames else pd.DataFrame()
+    return artifact_df, labels, series_by_label
+
+
+def plot_artifact_overlays_and_metrics(
+    exports: list[dict],
+    diag_df: pd.DataFrame,
+    *,
+    window_sec: float = 2.0,
+    step_sec: float = 1.0,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = 60.0,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+    overlay_mode: str = "always",
+    overlay_max_windows: int = 200,
+    trace_window_sec: float | None = None,
+    trace_max_points: int = 4000,
+    plot_diagnostics: bool = True,
+) -> pd.DataFrame:
+    import matplotlib.pyplot as plt
+
+    if diag_df is None or len(diag_df) == 0:
+        print("No diagnostics available for artifact plots.")
+        return pd.DataFrame()
+    labels = get_channel_labels(diag_df)
+    if not labels:
+        print("No EEG channel labels available for artifact plots.")
+        return pd.DataFrame()
+
+    artifact_df, _labels, series_by_label = compute_artifact_df(
+        exports,
+        diag_df,
+        labels=labels,
+        window_sec=window_sec,
+        step_sec=step_sec,
+        amplitude_range_threshold=amplitude_range_threshold,
+        line_noise_ratio_threshold=line_noise_ratio_threshold,
+        line_noise_hz=line_noise_hz,
+        line_noise_band_hz=line_noise_band_hz,
+        line_noise_max_hz=line_noise_max_hz,
+    )
+    if artifact_df.empty:
+        print("No artifact metrics available to plot.")
+        return artifact_df
+
+    overlay_mode = (overlay_mode or "always").lower()
+    for label in sorted(artifact_df["label"].unique()):
+        ts_df = series_by_label.get(label, pd.DataFrame())
+        if ts_df.empty:
+            continue
+        if trace_window_sec is not None:
+            cutoff = ts_df["t_sec"].max() - trace_window_sec
+            ts_plot = ts_df[ts_df["t_sec"] >= cutoff].copy()
+        else:
+            ts_plot = ts_df
+        if ts_plot.empty:
+            continue
+        if len(ts_plot) > trace_max_points:
+            stride = max(1, int(len(ts_plot) / trace_max_points))
+            ts_plot = ts_plot.iloc[::stride]
+
+        subset = artifact_df[artifact_df["label"] == label]
+        x_is_time = "timestamp" in ts_plot.columns and ts_plot["timestamp"].notna().any()
+        if x_is_time:
+            plot_start = ts_plot["timestamp"].min()
+            plot_end = ts_plot["timestamp"].max()
+            if "timestamp" in subset.columns:
+                subset = subset[(subset["timestamp"] >= plot_start) & (subset["timestamp"] <= plot_end)]
+        else:
+            plot_start = ts_plot["t_sec"].min()
+            plot_end = ts_plot["t_sec"].max()
+            subset = subset[(subset["t_sec"] >= plot_start) & (subset["t_sec"] <= plot_end)]
+
+        amp_hits = int(subset["amplitude_artifact"].sum())
+        line_hits = int(subset["line_noise_artifact"].sum())
+        both_hits = int(((subset["amplitude_artifact"]) & (subset["line_noise_artifact"])).sum())
+
+        fig, ax = plt.subplots(figsize=(12, 3))
+        if x_is_time:
+            import tzlocal
+            ts = to_local_datetime_index(ts_plot["timestamp"]).reset_index(drop=True)
+            ax.plot(ts, ts_plot["sample"], color="#38bdf8", linewidth=0.8)
+            ax.set_xlabel("Local Date/Time")
+            import matplotlib.dates as mdates
+            local_tz = tzlocal.get_localzone()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M:%S %Z", tz=local_tz))
+            fig.autofmt_xdate()
+        else:
+            ax.plot(ts_plot["t_sec"], ts_plot["sample"], color="#38bdf8", linewidth=0.8)
+            ax.set_xlabel("Seconds")
+        ax.set_title(f"{label} | amplitude hits={amp_hits}, line-noise hits={line_hits}, both={both_hits}")
+        ax.set_ylabel("Amplitude")
+        ax.grid(alpha=0.2)
+
+        overlay_ok = overlay_mode == "always"
+        if overlay_mode == "auto":
+            overlay_ok = len(subset) <= overlay_max_windows
+        if overlay_mode == "off":
+            overlay_ok = False
+
+        if not overlay_ok:
+            ax.text(
+                0.99,
+                0.95,
+                f"Overlays off (windows={len(subset)})",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=9,
+                color="#64748b",
+            )
+        else:
+            for _, row in subset.iterrows():
+                if x_is_time and "timestamp" in row and pd.notna(row["timestamp"]):
+                    end = to_local_datetime_index(pd.Series([row["timestamp"]])).iloc[0]
+                    start = end - pd.Timedelta(seconds=window_sec)
+                else:
+                    start = row["t_sec"] - window_sec
+                    end = row["t_sec"]
+                if row["amplitude_artifact"] and row["line_noise_artifact"]:
+                    color = "#ef4444"
+                elif row["amplitude_artifact"]:
+                    color = "#f97316"
+                elif row["line_noise_artifact"]:
+                    color = "#60a5fa"
+                else:
+                    continue
+                ax.axvspan(start, end, color=color, alpha=0.18)
+        plt.show()
+
+    summary = (
+        artifact_df.groupby("label")[["amplitude_artifact", "line_noise_artifact", "artifact"]]
+        .mean()
+        .rename(
+            columns={
+                "amplitude_artifact": "amplitude_artifact_rate",
+                "line_noise_artifact": "line_noise_artifact_rate",
+                "artifact": "artifact_rate",
+            }
+        )
+        .sort_values("artifact_rate", ascending=False)
+    )
+    print("Artifact rates by label (% of windows):")
+    print((summary * 100).round(1))
+
+    if plot_diagnostics:
+        for label in labels:
+            subset = artifact_df[artifact_df["label"] == label]
+            if subset.empty:
+                continue
+            fig, axes = plt.subplots(2, 1, figsize=(12, 4), sharex=True)
+            if "timestamp" in subset.columns and subset["timestamp"].notna().any():
+                import tzlocal
+                ts = to_local_datetime_index(subset["timestamp"]).reset_index(drop=True)
+                axes[0].plot(ts, subset["amplitude_range"], color="#f97316", linewidth=1.0)
+                axes[1].plot(ts, subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
+                axes[1].set_xlabel("Local Date/Time")
+                import matplotlib.dates as mdates
+                local_tz = tzlocal.get_localzone()
+                axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M:%S %Z", tz=local_tz))
+                fig.autofmt_xdate()
+            else:
+                axes[0].plot(subset["t_sec"], subset["amplitude_range"], color="#f97316", linewidth=1.0)
+                axes[1].plot(subset["t_sec"], subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
+                axes[1].set_xlabel("Seconds")
+            axes[0].axhline(amplitude_range_threshold, color="#ef4444", linestyle="--", linewidth=0.9)
+            axes[0].set_ylabel("Amplitude range")
+            axes[0].grid(alpha=0.2)
+            axes[1].axhline(line_noise_ratio_threshold, color="#ef4444", linestyle="--", linewidth=0.9)
+            axes[1].set_ylabel("Line noise ratio")
+            axes[1].grid(alpha=0.2)
+            fig.suptitle(f"Artifact metrics: {label}")
+            plt.show()
+
+    return artifact_df
 
 
 def coerce_timestamp(ts_str) -> pd.Timestamp | None:
@@ -146,6 +625,11 @@ def list_sample_files(raw_dir: Path | str, pattern: str = "samples_*.json") -> l
         json_files = list(raw_dir.glob("samples_*.json"))
         bids_files = list(raw_dir.glob("*_eeg.vhdr"))
         return sorted(json_files + bids_files)
+    return sorted(raw_dir.glob(pattern))
+
+
+def list_ppg_files(raw_dir: Path | str, pattern: str = "*_ppg.tsv") -> list[Path]:
+    raw_dir = Path(raw_dir)
     return sorted(raw_dir.glob(pattern))
 
 
@@ -267,6 +751,180 @@ def load_sample_exports(raw_dir: Path | str, pattern: str = "samples_*.json", li
     return [load_sample_export(p) for p in files]
 
 
+def load_ppg_export(path: Path | str) -> dict:
+    path = Path(path)
+    sidecar_path = path.with_suffix(".json")
+    sidecar = {}
+    if sidecar_path.exists():
+        with open(sidecar_path) as f:
+            sidecar = json.load(f)
+
+    sampling_rate_hz = float(sidecar.get("SamplingFrequency") or 64)
+    df = pd.read_csv(path, sep="\t")
+    if df.empty:
+        raise ValueError(f"PPG TSV has no rows: {path}")
+
+    columns = [c for c in df.columns if c]
+    channels = []
+    for col in columns:
+        samples = df[col].astype(float).tolist()
+        channels.append(
+            {
+                "label": col,
+                "samples": samples,
+                "samplingRateHz": sampling_rate_hz,
+            }
+        )
+
+    captured_at = (
+        sidecar.get("AcquisitionDateTime")
+        or sidecar.get("RecordingStartTime")
+        or sidecar.get("CapturedAt")
+    )
+    capture_ended_at = None
+    if captured_at:
+        capture_start = coerce_timestamp(captured_at)
+        if capture_start is not None and len(df) > 0 and sampling_rate_hz:
+            capture_ended_at = (
+                capture_start + pd.to_timedelta((len(df) - 1) / sampling_rate_hz, unit="s")
+            ).isoformat()
+
+    export = {
+        "capturedAt": captured_at,
+        "captureEndedAt": capture_ended_at,
+        "samplingRateHz": sampling_rate_hz,
+        "sensors": "-".join(columns),
+        "channels": channels,
+        "_sidecar": sidecar,
+    }
+    export["_path"] = str(path)
+    export["_file"] = path.name
+    return export
+
+
+def load_ppg_exports(raw_dir: Path | str, pattern: str = "*_ppg.tsv", limit: int | None = None) -> list[dict]:
+    files = list_ppg_files(raw_dir, pattern=pattern)
+    if limit is not None:
+        files = files[: int(limit)]
+    return [load_ppg_export(p) for p in files]
+
+
+def combine_ppg_channels(export: dict) -> tuple[np.ndarray, float] | tuple[None, None]:
+    channels = export.get("channels", []) or []
+    if not channels:
+        return None, None
+    sampling_rate = float(export.get("samplingRateHz") or 64.0)
+    series = [np.asarray(ch.get("samples", []) or [], dtype=float) for ch in channels]
+    if not series or any(s.size == 0 for s in series):
+        return None, None
+    min_len = min(len(s) for s in series)
+    aligned = [s[-min_len:] for s in series]
+    standardized = []
+    for s in aligned:
+        mean = s.mean()
+        std = s.std() or 1.0
+        standardized.append((s - mean) / std)
+    combined = np.mean(np.stack(standardized, axis=0), axis=0)
+    return combined, sampling_rate
+
+
+def combine_ppg_exports(exports: list[dict]) -> dict | None:
+    exports = [e for e in (exports or []) if e]
+    if not exports:
+        return None
+    # Sort by capture start if available to preserve session order.
+    exports_sorted = sorted(
+        exports,
+        key=lambda e: export_capture_start(e) or coerce_timestamp(e.get("capturedAt")) or pd.Timestamp.min
+    )
+    rates = [float(e.get("samplingRateHz") or 64.0) for e in exports_sorted]
+    sampling_rate = rates[0] if rates else 64.0
+    label_map: dict[str, list[float]] = {}
+    for export in exports_sorted:
+        for ch in export.get("channels", []) or []:
+            label = ch.get("label")
+            if not label:
+                continue
+            label_map.setdefault(label, []).extend(ch.get("samples", []) or [])
+    channels = [
+        {"label": label, "samples": samples, "samplingRateHz": sampling_rate}
+        for label, samples in label_map.items()
+    ]
+    return {
+        "capturedAt": exports_sorted[0].get("capturedAt"),
+        "captureEndedAt": exports_sorted[-1].get("captureEndedAt"),
+        "samplingRateHz": sampling_rate,
+        "sensors": "-".join(label_map.keys()),
+        "channels": channels,
+        "_sidecar": {},
+        "_path": None,
+        "_file": None,
+    }
+
+
+def moving_average(samples: np.ndarray, window_size: int) -> np.ndarray:
+    if window_size <= 1:
+        return samples.copy()
+    out = np.zeros_like(samples, dtype=float)
+    acc = 0.0
+    for i, v in enumerate(samples):
+        acc += v
+        if i >= window_size:
+            acc -= samples[i - window_size]
+        denom = min(i + 1, window_size)
+        out[i] = acc / denom
+    return out
+
+
+def process_ppg_cardiogram(samples: np.ndarray, fs: float) -> np.ndarray:
+    if samples.size == 0:
+        return samples
+    samples = bandpass_filter(samples, low_hz=0.5, high_hz=5.0, fs=fs, order=4)
+    short_win = max(3, int(fs * 0.2))
+    long_win = max(short_win + 1, int(fs * 1.2))
+    fast = moving_average(samples, short_win)
+    slow = moving_average(samples, long_win)
+    band = fast - slow
+    median = float(np.median(band))
+    mad = float(np.median(np.abs(band - median)))
+    scale = (1.4826 * mad) if mad > 0 else float(band.std() or 1.0)
+    return (band - median) / scale
+
+
+def estimate_hr_bpm(samples: np.ndarray, fs: float) -> float | None:
+    if samples.size < fs * 2:
+        return None
+    mean = float(samples.mean())
+    std = float(samples.std())
+    threshold = mean + std * 0.5
+    min_distance = max(1, int(fs * 0.35))
+    peaks, _ = signal.find_peaks(samples, height=threshold, distance=min_distance)
+    if len(peaks) < 2:
+        return None
+    intervals = np.diff(peaks) / fs
+    avg_interval = float(intervals.mean()) if intervals.size else 0.0
+    if avg_interval <= 0:
+        return None
+    bpm = 60.0 / avg_interval
+    return float(np.round(bpm))
+
+
+def heart_rate_series(samples: np.ndarray, fs: float, window_sec: int = 15, step_sec: int = 1) -> pd.DataFrame:
+    window_samples = int(window_sec * fs)
+    step_samples = max(1, int(step_sec * fs))
+    if samples.size < window_samples:
+        return pd.DataFrame(columns=["t_sec", "bpm"])
+    rows = []
+    for start in range(0, samples.size - window_samples + 1, step_samples):
+        window = samples[start:start + window_samples]
+        bpm = estimate_hr_bpm(window, fs)
+        if bpm is None:
+            continue
+        t_sec = (start + window_samples) / fs
+        rows.append({"t_sec": t_sec, "bpm": bpm})
+    return pd.DataFrame(rows)
+
+
 def export_file_sampling_rate(export: dict, default_fs: float = DEFAULT_FS) -> float:
     return export.get("samplingRateHz") or default_fs
 
@@ -289,6 +947,16 @@ def export_capture_end(export: dict) -> pd.Timestamp | None:
 
 def export_channels(export: dict) -> list[dict]:
     return export.get("channels", []) or []
+
+
+def export_capture_start_for_label(exports: list[dict], target_label: str) -> pd.Timestamp | None:
+    for export in exports or []:
+        for ch in export_channels(export):
+            if channel_label(ch) == target_label:
+                capture_start = export_capture_start(export)
+                if capture_start is not None:
+                    return capture_start
+    return None
 
 
 def channel_label(channel: dict):
@@ -486,9 +1154,12 @@ def plot_raw_traces_per_label(
     diag_df: pd.DataFrame | None = None,
     window_sec: int = 10,
     max_points: int = 3000,
+    fig_width: float = 12,
+    title_prefix: str = "EEG",
 ):
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+    import tzlocal
 
     if not exports:
         raise FileNotFoundError("No sample exports loaded")
@@ -505,34 +1176,21 @@ def plot_raw_traces_per_label(
         raise ValueError("No channel time series found to plot")
 
 
-    # Plot all available data for each channel
+    # Plot all available data for each channel (full session)
     start_ts = min(df["timestamp"].min() for df in non_empty.values())
     end_ts = max(df["timestamp"].max() for df in non_empty.values())
 
     # Print the time window being plotted (in local time)
-    import tzlocal
-    local_tz = tzlocal.get_localzone()
-    start_ts_obj = pd.to_datetime(start_ts)
-    end_ts_obj = pd.to_datetime(end_ts)
-    if start_ts_obj.tzinfo is None:
-        start_ts_local = start_ts_obj.tz_localize('UTC').tz_convert(local_tz)
-    else:
-        start_ts_local = start_ts_obj.tz_convert(local_tz)
-    if end_ts_obj.tzinfo is None:
-        end_ts_local = end_ts_obj.tz_localize('UTC').tz_convert(local_tz)
-    else:
-        end_ts_local = end_ts_obj.tz_convert(local_tz)
+    start_ts_local = to_local_datetime_index(pd.Series([start_ts])).iloc[0]
+    end_ts_local = to_local_datetime_index(pd.Series([end_ts])).iloc[0]
     print(f"Plotting window: {start_ts_local.strftime('%Y-%m-%d %H:%M:%S %Z')} to {end_ts_local.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     fig_h = max(2.2 * len(labels), 3)
-    fig, axes = plt.subplots(len(labels), 1, figsize=(12, fig_h), sharex=True)
+    fig, axes = plt.subplots(len(labels), 1, figsize=(fig_width, fig_h), sharex=True)
     if len(labels) == 1:
         axes = [axes]
 
 
-    import pytz
-    import tzlocal
-    local_tz = tzlocal.get_localzone()
     for ax, lbl in zip(axes, labels):
         df = series_by_label.get(lbl)
         if df is None or len(df) == 0:
@@ -552,9 +1210,7 @@ def plot_raw_traces_per_label(
         dfw = dfw.iloc[::stride]
 
         # Convert timestamps to local time
-        ts = pd.to_datetime(dfw["timestamp"]).dt.tz_convert(local_tz)
-        ts = ts.reset_index(drop=True)
-        print(ts)
+        ts = to_local_datetime_index(dfw["timestamp"]).reset_index(drop=True)
         y = dfw["sample"].to_numpy(dtype=float)
         y = y - y.mean()
         if len(ts) < 2:
@@ -574,16 +1230,14 @@ def plot_raw_traces_per_label(
         ax.set_ylabel(lbl)
         ax.grid(True, alpha=0.2)
 
-    axes[-1].set_xlabel("Clock Time")
-    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    local_tz = tzlocal.get_localzone()
+    axes[-1].set_xlabel("Local Date/Time")
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
     fig.autofmt_xdate()
-    fig.suptitle(f"Raw EEG traces per channel (last {window_sec}s)", y=1.02)
-    # Show local time range at the bottom
-    captured_at = pd.to_datetime(diag_df["captured_at"], errors="coerce", utc=True)
-    if captured_at.notna().any():
-        min_ts = captured_at.min().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
-        max_ts = captured_at.max().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
-        fig.text(0.5, 0.01, f"Data captured from {min_ts} to {max_ts}", ha='center', va='bottom', fontsize=8, color='gray')
+    fig.suptitle(f"Raw {title_prefix} traces per channel (full session)", y=1.02)
+    time_range_str = _get_time_range_str(diag_df)
+    if time_range_str:
+        fig.text(0.5, 0.01, time_range_str, ha='center', va='bottom', fontsize=8, color='gray')
 
     plt.tight_layout(rect=[0, 0.03, 1, 1])
     plt.show()
@@ -601,6 +1255,7 @@ def plot_spectrograms_per_label(
     noverlap: int | None = None,
     per_channel_height: float = 2.8,
     dpi: int = 140,
+    fig_width: float = 12,
 ):
     import matplotlib.pyplot as plt
 
@@ -618,47 +1273,89 @@ def plot_spectrograms_per_label(
     if not non_empty:
         raise ValueError("No channel time series found to plot")
 
-    spec = {}
+    nperseg_effective = int(NPERSEG if nperseg is None else nperseg)
+    noverlap_effective = int(NOVERLAP if noverlap is None else noverlap)
+    nfft_effective = None
+    if nfft is not None:
+        nfft_effective = int(max(nfft, nperseg_effective))
+
+    spec: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray, pd.Timestamp | None]]] = {}
     all_db = []
     for lbl in labels:
         df = series_by_label.get(lbl)
         if df is None or len(df) == 0:
             continue
 
+        df = df.copy().reset_index(drop=True)
+        has_ts = False
+        if "timestamp" in df.columns:
+            ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+            valid_ts = ts.notna()
+            if valid_ts.any():
+                df = df.loc[valid_ts].copy().reset_index(drop=True)
+                df["timestamp"] = ts.loc[valid_ts].reset_index(drop=True)
+                has_ts = True
+        if df.empty:
+            continue
+
         channel_rate = float(df["sampling_rate_hz"].mode().iloc[0]) if "sampling_rate_hz" in df else DEFAULT_FS
-        samples = df["sample"].to_numpy(dtype=float)
+        if has_ts:
+            df = df.sort_values("timestamp").reset_index(drop=True)
 
-        # Plot all available data if max_spectrogram_sec is None
         if max_spectrogram_sec is not None:
-            max_samples = int(max_spectrogram_sec * channel_rate)
-            if len(samples) > max_samples:
-                samples = samples[-max_samples:]
+            max_samples = max(1, int(max_spectrogram_sec * channel_rate))
+            if has_ts:
+                cutoff = df["timestamp"].max() - pd.Timedelta(seconds=max_spectrogram_sec)
+                recent = df[df["timestamp"] >= cutoff]
+                if not recent.empty:
+                    df = recent.reset_index(drop=True)
+                elif len(df) > max_samples:
+                    df = df.iloc[-max_samples:].reset_index(drop=True)
+            elif len(df) > max_samples:
+                df = df.iloc[-max_samples:].reset_index(drop=True)
 
-        samples = samples - samples.mean()
+        if len(df) < nperseg_effective:
+            continue
 
-        nperseg_effective = int(NPERSEG if nperseg is None else nperseg)
-        noverlap_effective = int(NOVERLAP if noverlap is None else noverlap)
-        nfft_effective = None
-        if nfft is not None:
-            nfft_effective = int(max(nfft, nperseg_effective))
+        segments = []
+        if has_ts:
+            diffs = df["timestamp"].diff().dt.total_seconds().fillna(0)
+            positive_diffs = diffs[diffs > 0]
+            median_diff = positive_diffs.median() if not positive_diffs.empty else (1.0 / channel_rate)
+            gap_threshold = 2 * median_diff if median_diff > 0 else (2.0 / channel_rate)
+            start_idx = 0
+            for idx in range(1, len(df)):
+                if diffs.iloc[idx] > gap_threshold:
+                    segments.append(df.iloc[start_idx:idx])
+                    start_idx = idx
+            segments.append(df.iloc[start_idx:])
+        else:
+            segments = [df]
 
-        f, t, Sxx = signal.spectrogram(
-            samples,
-            fs=channel_rate,
-            window="hann",
-            nperseg=nperseg_effective,
-            noverlap=noverlap_effective,
-            nfft=nfft_effective,
-            detrend=False,
-            scaling="density",
-        )
-        mask = f <= max_freq_hz
-        f = f[mask]
-        Sxx = Sxx[mask]
-        Sxx_db = 10 * np.log10(np.maximum(Sxx, 1e-12))
+        segment_specs = []
+        for segment in segments:
+            if len(segment) < nperseg_effective:
+                continue
+            samples = segment["sample"].to_numpy(dtype=float)
+            spec_result = compute_spectrogram_psd(
+                samples,
+                channel_rate,
+                nperseg=nperseg_effective,
+                noverlap=noverlap_effective,
+                nfft=nfft_effective,
+                max_freq_hz=max_freq_hz,
+                apply_filters=True,
+            )
+            if spec_result is None:
+                continue
+            f_masked, t, Sxx = spec_result
+            Sxx_db = 10 * np.log10(np.maximum(Sxx, 1e-12))
+            start_ts = segment["timestamp"].iloc[0] if has_ts else None
+            segment_specs.append((f_masked, t, Sxx_db, start_ts))
+            all_db.append(Sxx_db.ravel())
 
-        spec[lbl] = (f, t, Sxx_db)
-        all_db.append(Sxx_db.ravel())
+        if segment_specs:
+            spec[lbl] = segment_specs
 
     if not spec:
         raise ValueError("No spectrograms computed (insufficient samples?)")
@@ -667,15 +1364,18 @@ def plot_spectrograms_per_label(
     vmin, vmax = np.percentile(all_db, [5, 95])
 
     fig_h = max(per_channel_height * len(labels), 3.5)
-    fig, axes = plt.subplots(len(labels), 1, figsize=(12, fig_h), sharex=True, dpi=dpi, constrained_layout=True)
+    fig, axes = plt.subplots(len(labels), 1, figsize=(fig_width, fig_h), sharex=True, dpi=dpi, constrained_layout=True)
     if len(labels) == 1:
         axes = [axes]
 
     pcm = None
     import matplotlib.dates as mdates
-
     import tzlocal
-    local_tz = tzlocal.get_localzone()
+    has_clock_time = bool(spec) and all(
+        all(start_ts is not None for _, _, _, start_ts in segments)
+        for segments in spec.values()
+    )
+
     for ax, lbl in zip(axes, labels):
         if lbl not in spec:
             ax.text(0.5, 0.5, f"{lbl}: no data", transform=ax.transAxes, ha="center", va="center")
@@ -683,36 +1383,29 @@ def plot_spectrograms_per_label(
             ax.grid(False)
             continue
 
-        f, t, Sxx_db = spec[lbl]
-        df = series_by_label.get(lbl)
-        if df is not None and len(df) > 0:
-            t0 = df["timestamp"].iloc[0]
-            t_clock = (pd.to_datetime(t0) + pd.to_timedelta(t, unit="s")).tz_convert(local_tz)
-            # Handle discontinuities: split t_clock into continuous segments
-            if len(t_clock) < 2:
-                pcm = ax.pcolormesh(t_clock, f, Sxx_db, shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
+        for f_vals, t_vals, Sxx_db, start_ts in spec[lbl]:
+            if start_ts is not None:
+                start_ts_local = to_local_datetime_index(pd.Series([start_ts])).iloc[0]
+                x_coords = pd.DatetimeIndex(start_ts_local + pd.to_timedelta(t_vals, unit="s"))
             else:
-                diffs = pd.Series(t_clock).diff().dt.total_seconds().fillna(0)
-                median_diff = diffs[diffs > 0].median() if (diffs > 0).any() else 0
-                gap_idx = diffs > (2 * median_diff if median_diff > 0 else 2)
-                segment_starts = [0] + list((gap_idx[gap_idx].index).to_list())
-                segment_ends = list((gap_idx[gap_idx].index).to_list()) + [len(t_clock)]
-                for start, end in zip(segment_starts, segment_ends):
-                    if end - start < 2:
-                        continue
-                    pcm = ax.pcolormesh(t_clock[start:end], f, Sxx_db[:, start:end], shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-        else:
-            pcm = ax.pcolormesh(t, f, Sxx_db, shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
+                x_coords = t_vals
+            pcm = ax.pcolormesh(x_coords, f_vals, Sxx_db, shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
         ax.set_ylabel(lbl)
         ax.set_ylim(0.5, max_freq_hz)
+        if has_clock_time:
+            local_tz = tzlocal.get_localzone()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
 
-    axes[-1].set_xlabel("Clock Time")
-    fig.autofmt_xdate()
+    if has_clock_time:
+        axes[-1].set_xlabel("Local Date/Time")
+        fig.autofmt_xdate()
+    else:
+        axes[-1].set_xlabel("Time (s)")
+
     fig.suptitle("Spectrogram per channel (Welch/Hann)", y=0.99)
 
     if pcm is not None:
-        fig.colorbar(pcm, ax=axes, label="dB", shrink=0.6)
+        fig.colorbar(pcm, ax=axes, label="dB", orientation="horizontal", pad=0.08, shrink=0.8)
 
     time_range_str = _get_time_range_str(diag_df)
     if time_range_str:
@@ -721,25 +1414,79 @@ def plot_spectrograms_per_label(
     plt.close(fig)
 
 
-def compute_band_power_timeseries(samples: np.ndarray, fs: float, step_samples: int | None = None) -> pd.DataFrame:
+def compute_band_power_timeseries(
+    samples: np.ndarray,
+    fs: float,
+    step_samples: int | None = None,
+    nfft: int | None = SPECTROGRAM_NFFT,
+    reject_artifacts: bool = False,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = LINE_NOISE_HZ,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+) -> pd.DataFrame:
     if step_samples is None:
         step_samples = NPERSEG // 2
-    rows = []
     # If samples is a pandas Series with datetime index, use it for timestamps
     is_series = hasattr(samples, 'index') and hasattr(samples.index, 'values')
     sample_index = samples.index if is_series else None
-    for start in range(0, len(samples) - NPERSEG + 1, step_samples):
-        seg = samples[start : start + NPERSEG]
-        freqs_win, psd_win = compute_psd(seg, fs=fs)
+    samples_arr = samples.to_numpy(dtype=float) if is_series else np.asarray(samples, dtype=float)
+    if len(samples_arr) < NPERSEG:
+        return pd.DataFrame()
+    nperseg = NPERSEG
+    noverlap = max(0, nperseg - step_samples)
+    spec = compute_spectrogram_psd(
+        samples_arr,
+        fs,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        nfft=nfft,
+        max_freq_hz=50.0,
+        apply_filters=True,
+    )
+    if spec is None:
+        return pd.DataFrame()
+    freqs_win, times, psd = spec
+
+    rows = []
+    for idx, start in enumerate(range(0, len(samples_arr) - nperseg + 1, step_samples)):
+        if idx >= psd.shape[1]:
+            break
+        seg = samples_arr[start : start + nperseg]
+        amplitude_range = float(np.ptp(seg))
+        line_noise_ratio = compute_line_noise_ratio(
+            seg,
+            fs=fs,
+            line_freq=line_noise_hz,
+            band_hz=line_noise_band_hz,
+            max_hz=line_noise_max_hz,
+        )
+        amplitude_artifact = (
+            amplitude_range_threshold is not None and amplitude_range > amplitude_range_threshold
+        )
+        line_noise_artifact = (
+            line_noise_ratio_threshold is not None and line_noise_ratio > line_noise_ratio_threshold
+        )
+        if reject_artifacts and (amplitude_artifact or line_noise_artifact):
+            continue
+        psd_win = psd[:, idx]
         bands = band_powers(freqs_win, psd_win)
-        t_mid = (start + (NPERSEG / 2)) / fs
+        t_mid = float(times[idx]) if idx < len(times) else (start + (nperseg / 2)) / fs
         # UTC timestamp for the window center, from original index if available
         timestamp_utc = None
         if is_series and len(sample_index) > 0:
-            idx = int(start + (NPERSEG // 2))
-            if idx < len(sample_index):
-                timestamp_utc = sample_index[idx]
-        row = {"t_sec": t_mid, "timestamp": timestamp_utc}
+            idx_mid = int(start + (nperseg // 2))
+            if idx_mid < len(sample_index):
+                timestamp_utc = sample_index[idx_mid]
+        row = {
+            "t_sec": t_mid,
+            "timestamp": timestamp_utc,
+            "amplitude_range": amplitude_range,
+            "line_noise_ratio": line_noise_ratio,
+            "amplitude_artifact": amplitude_artifact,
+            "line_noise_artifact": line_noise_artifact,
+        }
         for key, value in bands.items():
             row[f"{key}_abs"] = value["absolute"]
             row[f"{key}_rel"] = value["relative"]
@@ -777,7 +1524,18 @@ def _smooth_band_power_df(
     return out
 
 
-def compute_band_power_timeseries_for_label(exports: list[dict], target_label: str) -> tuple[pd.DataFrame, float]:
+def compute_band_power_timeseries_for_label(
+    exports: list[dict],
+    target_label: str,
+    *,
+    reject_artifacts: bool = False,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = LINE_NOISE_HZ,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+    nfft: int | None = SPECTROGRAM_NFFT,
+) -> tuple[pd.DataFrame, float]:
     series = load_label_timeseries(exports, target_label)
     if series is None or len(series) == 0:
         raise ValueError(f"No samples found for label={target_label}")
@@ -787,17 +1545,42 @@ def compute_band_power_timeseries_for_label(exports: list[dict], target_label: s
         samples = pd.Series(series["sample"].to_numpy(dtype=float), index=series["timestamp"])
     else:
         samples = series["sample"].to_numpy(dtype=float)
-    bp_ts = compute_band_power_timeseries(samples, fs)
+    bp_ts = compute_band_power_timeseries(
+        samples,
+        fs,
+        reject_artifacts=reject_artifacts,
+        amplitude_range_threshold=amplitude_range_threshold,
+        line_noise_ratio_threshold=line_noise_ratio_threshold,
+        line_noise_hz=line_noise_hz,
+        line_noise_band_hz=line_noise_band_hz,
+        line_noise_max_hz=line_noise_max_hz,
+        nfft=nfft,
+    )
     # If timestamp column is missing, reconstruct from t_sec and base timestamp
     if 'timestamp' not in bp_ts.columns and "timestamp" in series.columns and len(series) > 0:
         base_ts = series["timestamp"].iloc[0]
         bp_ts["timestamp"] = pd.to_datetime(base_ts) + pd.to_timedelta(bp_ts["t_sec"], unit="s")
+    if 'timestamp' not in bp_ts.columns:
+        capture_start = export_capture_start_for_label(exports, target_label)
+        if capture_start is not None:
+            bp_ts["timestamp"] = pd.to_datetime(capture_start, utc=True) + pd.to_timedelta(bp_ts["t_sec"], unit="s")
     if bp_ts.empty:
         raise ValueError(f"Not enough samples to compute band power for label={target_label}")
     return bp_ts, fs
 
 
-def compute_band_power_timeseries_combined(exports: list[dict], labels: list[str]) -> tuple[pd.DataFrame, float]:
+def compute_band_power_timeseries_combined(
+    exports: list[dict],
+    labels: list[str],
+    *,
+    reject_artifacts: bool = False,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = LINE_NOISE_HZ,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+    nfft: int | None = SPECTROGRAM_NFFT,
+) -> tuple[pd.DataFrame, float]:
     labels = [l for l in (labels or []) if l is not None]
     if not labels:
         raise ValueError("No labels provided for combined band power")
@@ -805,7 +1588,17 @@ def compute_band_power_timeseries_combined(exports: list[dict], labels: list[str
     bp_list = []
     fs_values = []
     for lbl in labels:
-        bp_ts, fs = compute_band_power_timeseries_for_label(exports, lbl)
+        bp_ts, fs = compute_band_power_timeseries_for_label(
+            exports,
+            lbl,
+            reject_artifacts=reject_artifacts,
+            amplitude_range_threshold=amplitude_range_threshold,
+            line_noise_ratio_threshold=line_noise_ratio_threshold,
+            line_noise_hz=line_noise_hz,
+            line_noise_band_hz=line_noise_band_hz,
+            line_noise_max_hz=line_noise_max_hz,
+            nfft=nfft,
+        )
         bp_list.append(bp_ts)
         fs_values.append(fs)
 
@@ -820,13 +1613,24 @@ def compute_band_power_timeseries_combined(exports: list[dict], labels: list[str
     step_sec = step_samples / fs0
     value_cols_abs = _band_power_value_columns(relative=False)
     all_cols = ["t_sec"] + value_cols_abs
+    has_timestamps = any("timestamp" in df.columns for df in bp_list)
 
     frames = []
+    ts_frames = []
     for df in bp_list:
         d = df[all_cols].copy()
         d["t_bin"] = (d["t_sec"] / step_sec).round().astype(int)
         d = d.groupby("t_bin", as_index=True).mean(numeric_only=True)
         frames.append(d)
+        if "timestamp" in df.columns:
+            ts = df[["t_sec", "timestamp"]].copy()
+            ts["t_bin"] = (ts["t_sec"] / step_sec).round().astype(int)
+            ts = ts.dropna(subset=["timestamp"])
+            if not ts.empty:
+                ts = ts.groupby("t_bin", as_index=True)["timestamp"].apply(
+                    lambda x: pd.to_datetime(x, errors="coerce", utc=True).dropna().mean()
+                )
+                ts_frames.append(ts)
 
     common = None
     for frame in frames:
@@ -852,6 +1656,17 @@ def compute_band_power_timeseries_combined(exports: list[dict], labels: list[str
 
     value_cols_rel = _band_power_value_columns(relative=True)
     cols = ["t_sec"] + value_cols_abs + value_cols_rel
+    if has_timestamps and ts_frames:
+        ts_common = None
+        for ts in ts_frames:
+            idx = set(ts.index)
+            ts_common = idx if ts_common is None else ts_common.intersection(idx)
+        if ts_common:
+            ts_common = sorted(ts_common)
+            ts_values = pd.concat([ts.loc[ts_common] for ts in ts_frames], axis=1)
+            ts_mean = ts_values.mean(axis=1)
+            avg["timestamp"] = ts_mean.to_numpy()
+            cols = ["t_sec", "timestamp"] + value_cols_abs + value_cols_rel
     return avg[cols], fs0
 
 
@@ -862,8 +1677,10 @@ def plot_band_power_diagram(
     relative: bool = True,
     fs: float = DEFAULT_FS,
     ax=None,
+    target_history: dict[str, list[dict]] | None = None,
 ):
     import matplotlib.pyplot as plt
+    import tzlocal
 
     step_samples = NPERSEG // 2
     bp_plot = _smooth_band_power_df(bp_ts, fs=fs, avg_sec=avg_sec, relative=relative, step_samples=step_samples)
@@ -876,14 +1693,62 @@ def plot_band_power_diagram(
     # Try to use clock time if available
     import matplotlib.dates as mdates
     # Use timestamp column if available, else fall back to t_sec
+    target_history = target_history or {}
+    target_frames = {band["key"]: _normalize_target_history(target_history.get(band["key"], [])) for band in BANDS}
     if "timestamp" in bp_plot.columns:
         ts = to_local_datetime_index(bp_plot["timestamp"])
+        sens_axes = None
+        if any(not df.empty for df in target_frames.values()):
+            sens_vals = [
+                v for df in target_frames.values()
+                for v in df.get("sensitivity", pd.Series(dtype=float)).dropna().tolist()
+            ]
+            if sens_vals:
+                sens_min = min(sens_vals)
+                sens_max = max(sens_vals)
+                sens_pad = max(0.05, (sens_max - sens_min) * 0.2)
+                sens_axes = ax.twinx()
+                sens_axes.set_ylim(sens_min - sens_pad, sens_max + sens_pad)
+                sens_axes.set_ylabel("Sensitivity")
+                sens_axes.grid(False)
+        for i, band in enumerate(BANDS):
+            hist_df = target_frames.get(band["key"])
+            if hist_df is None or hist_df.empty:
+                continue
+            hist_local = to_local_datetime_index(hist_df["timestamp"])
+            lower = hist_df["target"] - hist_df["tolerance"]
+            upper = hist_df["target"] + hist_df["tolerance"]
+            ax.fill_between(
+                hist_local,
+                lower,
+                upper,
+                color=colors[i % len(colors)],
+                alpha=0.12,
+                linewidth=0,
+            )
+            ax.plot(
+                hist_local,
+                hist_df["target"],
+                color=colors[i % len(colors)],
+                linewidth=1.0,
+                alpha=0.5,
+                label=f"{band['label']} target",
+            )
+            if sens_axes is not None and "sensitivity" in hist_df.columns:
+                sens_axes.plot(
+                    hist_local,
+                    hist_df["sensitivity"],
+                    color=colors[i % len(colors)],
+                    linewidth=1.0,
+                    alpha=0.7,
+                    linestyle="--",
+                )
         for i, band in enumerate(BANDS):
             y = bp_plot[value_cols[i]].to_numpy(dtype=float)
             if len(ts) < 2:
                 ax.plot(ts, y, linewidth=1.4, color=colors[i % len(colors)], label=band["label"])
             else:
-                diffs = ts.to_series().diff().dt.total_seconds().fillna(0)
+                diffs = ts.diff().dt.total_seconds().fillna(0)
                 median_diff = diffs[diffs > 0].median() if (diffs > 0).any() else 0
                 gap_idx = diffs > (2 * median_diff if median_diff > 0 else 2)
                 segment_starts = [0] + list((gap_idx[gap_idx].index).to_list())
@@ -892,12 +1757,65 @@ def plot_band_power_diagram(
                     if end - start < 2:
                         continue
                     ax.plot(ts[start:end], y[start:end], linewidth=1.4, color=colors[i % len(colors)], label=band["label"] if start == 0 else None)
+        local_tz = tzlocal.get_localzone()
         ax.set_xlabel("Local Date/Time")
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
         import matplotlib.pyplot as plt
         plt.gcf().autofmt_xdate()
     else:
         t_sec = bp_plot["t_sec"]
+        sens_axes = None
+        if any(not df.empty for df in target_frames.values()):
+            t0 = None
+            for df in target_frames.values():
+                if not df.empty:
+                    t0 = df["timestamp"].iloc[0]
+                    break
+            if t0 is not None:
+                sens_vals = [
+                    v for df in target_frames.values()
+                    for v in df.get("sensitivity", pd.Series(dtype=float)).dropna().tolist()
+                ]
+                if sens_vals:
+                    sens_min = min(sens_vals)
+                    sens_max = max(sens_vals)
+                    sens_pad = max(0.05, (sens_max - sens_min) * 0.2)
+                    sens_axes = ax.twinx()
+                    sens_axes.set_ylim(sens_min - sens_pad, sens_max + sens_pad)
+                    sens_axes.set_ylabel("Sensitivity")
+                    sens_axes.grid(False)
+                for i, band in enumerate(BANDS):
+                    hist_df = target_frames.get(band["key"])
+                    if hist_df is None or hist_df.empty:
+                        continue
+                    t_hist = (hist_df["timestamp"] - t0).dt.total_seconds()
+                    lower = hist_df["target"] - hist_df["tolerance"]
+                    upper = hist_df["target"] + hist_df["tolerance"]
+                    ax.fill_between(
+                        t_hist,
+                        lower,
+                        upper,
+                        color=colors[i % len(colors)],
+                        alpha=0.12,
+                        linewidth=0,
+                    )
+                    ax.plot(
+                        t_hist,
+                        hist_df["target"],
+                        color=colors[i % len(colors)],
+                        linewidth=1.0,
+                        alpha=0.5,
+                        label=f"{band['label']} target",
+                    )
+                    if sens_axes is not None and "sensitivity" in hist_df.columns:
+                        sens_axes.plot(
+                            t_hist,
+                            hist_df["sensitivity"],
+                            color=colors[i % len(colors)],
+                            linewidth=1.0,
+                            alpha=0.7,
+                            linestyle="--",
+                        )
         for i, band in enumerate(BANDS):
             ax.plot(t_sec, bp_plot[value_cols[i]], label=band["label"], linewidth=1.4, color=colors[i % len(colors)])
         ax.set_xlabel("Time (s)")
@@ -915,9 +1833,18 @@ def plot_band_power_diagrams(
     *,
     show: bool = True,
     return_fig: bool = False,
+    fig_width: float = 12,
+    reject_artifacts: bool = False,
+    amplitude_range_threshold: float | None = None,
+    line_noise_ratio_threshold: float | None = None,
+    line_noise_hz: float = LINE_NOISE_HZ,
+    line_noise_band_hz: float = 2.0,
+    line_noise_max_hz: float | None = 80.0,
+    nfft: int | None = SPECTROGRAM_NFFT,
 ):
     import matplotlib.pyplot as plt
 
+    target_history_by_label = extract_target_history(exports)
     labels = get_channel_labels(diag_df)
     if not labels:
         raise ValueError("No channel labels available")
@@ -939,18 +1866,29 @@ def plot_band_power_diagrams(
     groups.append(("All Combined", labels))
 
     fig_h = max(2.6 * len(groups), 4)
-    fig, axes = plt.subplots(len(groups), 1, figsize=(12, fig_h), sharex=True)
+    fig, axes = plt.subplots(len(groups), 1, figsize=(fig_width, fig_h), sharex=True)
     if len(groups) == 1:
         axes = [axes]
 
-    import tzlocal
-    local_tz = tzlocal.get_localzone()
     for ax, (name, group_labels) in zip(axes, groups):
-        bp_ts, fs = compute_band_power_timeseries_combined(exports, group_labels)
+        bp_ts, fs = compute_band_power_timeseries_combined(
+            exports,
+            group_labels,
+            reject_artifacts=reject_artifacts,
+            amplitude_range_threshold=amplitude_range_threshold,
+            line_noise_ratio_threshold=line_noise_ratio_threshold,
+            line_noise_hz=line_noise_hz,
+            line_noise_band_hz=line_noise_band_hz,
+            line_noise_max_hz=line_noise_max_hz,
+            nfft=nfft,
+        )
         # Print the time window being plotted (in local time)
         if "timestamp" in bp_ts.columns and not bp_ts["timestamp"].empty:
             ts_local = to_local_datetime_index(bp_ts["timestamp"])
             print(f"Band power plot window for {name}: {ts_local.min().strftime('%Y-%m-%d %H:%M:%S %Z')} to {ts_local.max().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        target_history = None
+        if len(group_labels) == 1:
+            target_history = target_history_by_label.get(group_labels[0])
         plot_band_power_diagram(
             bp_ts,
             title=f"Band power — {name}" + (" (relative)" if relative else " (absolute)"),
@@ -958,16 +1896,14 @@ def plot_band_power_diagrams(
             relative=relative,
             fs=fs,
             ax=ax,
+            target_history=target_history,
         )
 
     handles, labels_legend = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels_legend, ncol=5, fontsize=9, loc="upper center", bbox_to_anchor=(0.5, 1.01))
-    # Show local time range at the bottom
-    captured_at = pd.to_datetime(diag_df["captured_at"], errors="coerce", utc=True)
-    if captured_at.notna().any():
-        min_ts = captured_at.min().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
-        max_ts = captured_at.max().tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S %Z')
-        fig.text(0.5, 0.01, f"Data captured from {min_ts} to {max_ts}", ha='center', va='bottom', fontsize=8, color='gray')
+    time_range_str = _get_time_range_str(diag_df)
+    if time_range_str:
+        fig.text(0.5, 0.01, time_range_str, ha='center', va='bottom', fontsize=8, color='gray')
 
     plt.tight_layout(rect=[0, 0.03, 1, 1])
     if show:

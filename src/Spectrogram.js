@@ -65,7 +65,7 @@ function percentile(values, p) {
   return sorted[idx];
 }
 
-function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
+function Spectrogram({ eegData, selectedChannels, windowSeconds = 300, preferCachedSlices = true }) {
   const maxFreq = 50; // align with notebook spectrogram range
   const sampleRate = 256;
   const maxSamples = Math.round(windowSeconds * sampleRate);
@@ -93,8 +93,25 @@ function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
 
   const spectrograms = useMemo(() => {
     if (!channelsWithSpectra.length) return [];
+    const cutoffMs = Date.now() - windowSeconds * 1000;
     return channelsWithSpectra.map((channel) => {
       const label = channel.label || channel.electrode;
+      const slices = Array.isArray(channel.spectrogramSlices) ? channel.spectrogramSlices : [];
+      const usable = slices.filter(s => (s.t || 0) >= cutoffMs);
+      if (preferCachedSlices && usable.length >= 2) {
+        const freqs = usable[0].frequencies || [];
+        const freqMask = freqs.map((f) => f <= maxFreq);
+        const times = usable.map(s => (s.t - usable[0].t) / 1000);
+        const EPS = 1e-12;
+        const dbSlices = usable.map((s) => {
+          const mags = s.magnitudes || [];
+          const filtered = mags.filter((_, idx) => freqMask[idx]);
+          return filtered.map(v => 10 * Math.log10(Math.max(v, EPS)));
+        });
+        const freqsFiltered = freqs.filter((_, idx) => freqMask[idx]);
+        return { label, freqs: freqsFiltered, times, dbSlices };
+      }
+
       const samples = channel.samples || [];
       const clipped = maxSamples > 0 ? samples.slice(-maxSamples) : samples.slice();
       if (clipped.length < nperseg) return null;
@@ -106,7 +123,7 @@ function Spectrogram({ eegData, selectedChannels, windowSeconds = 300 }) {
       const dbSlices = spec.slices.map(slice => slice.map(v => 10 * Math.log10(Math.max(v, EPS))));
       return { label, freqs: spec.freqs, times: spec.times, dbSlices };
     }).filter(Boolean);
-  }, [channelsWithSpectra, maxFreq, nfft, noverlap, nperseg, sampleRate, windowSeconds]);
+  }, [channelsWithSpectra, maxFreq, maxSamples, nfft, noverlap, nperseg, sampleRate, windowSeconds, preferCachedSlices]);
 
   const labels = spectrograms.map(s => s.label);
   const rowHeight = 180;

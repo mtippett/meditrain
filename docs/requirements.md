@@ -8,12 +8,14 @@
 - Device connectivity: initiate and manage Bluetooth connection to Muse; expose connect/disconnect states; enable AUX electrodes; surface available channel map to the app.
 - Data acquisition: subscribe to EEG stream per electrode; keep a rolling buffer of recent samples (current code keeps ~4096); allow optional raw-signal inspection per channel.
 - Signal processing: compute periodograms over recent windows (~1024 samples) at ~1 Hz; maintain a short history and averaged periodogram per electrode.
-- Band power analytics: calculate absolute and relative power for standard bands (delta, theta, alpha, beta, gamma); derive regional aggregates (left/right, front/back) and comparative ratios (e.g., left-right deltas).
-- Visualization: toggle views for raw EEG traces, per-channel periodograms, per-channel band power, and regional/relative band power comparisons; keep UI responsive while processing.
-- Training & feedback: provide training view and controls for selecting targets (band thresholds/ratios) and delivering feedback (audio/visual cues) when targets are met.
-- Logging & archiving: record session metadata (device info, channel map, timestamps), training events, band power trends, and optional raw/processed EEG for later analysis.
-- Configuration: allow users to tune processing parameters (window size, band cutoffs), visualization cadence, and training thresholds; persist reasonable defaults.
-- Resilience: detect stream dropouts or device disconnects; surface status to the user and attempt clean recovery without data corruption.
+- Artifact detection: compute amplitude and line-noise artifacts over rolling windows; surface rejection windows in the UI.
+- Band power analytics: calculate absolute and relative power for standard bands (delta, theta, alpha, beta, gamma); derive per-target ratios (e.g., theta/beta).
+- Visualization: toggle views for raw EEG traces, per-channel periodograms, band power history, and spectrograms; keep UI responsive while processing.
+- Training & feedback: provide training view and controls for selecting targets (band thresholds/ratios), per-target sensitivity adjustments, and audio feedback attenuation when targets are met.
+- Heart observatory: render PPG traces, cardiogram slices, and heart rate trends when PPG channels are available.
+- Logging & archiving: record session metadata (device info, channel map, timestamps), training events, band power trends, and optional raw/processed EEG for later analysis; support export with training metadata sidecars.
+- Configuration: allow users to tune processing parameters (window size, band cutoffs), visualization cadence, artifact thresholds, and training thresholds; persist reasonable defaults.
+- Resilience: detect stream dropouts or device disconnects; surface status to the user and attempt clean recovery without data corruption; reuse last good data on rejected windows.
 - Demo/offline mode (optional): simulate EEG input for development and onboarding when hardware is unavailable.
 
 ## Non-Functional Requirements
