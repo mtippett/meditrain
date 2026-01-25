@@ -1,15 +1,12 @@
 {
   "files": {
-    "main.css": "/meditrain/static/css/main.e6c13ad2.css",
-    "main.js": "/meditrain/static/js/main.e856f9e5.js",
-    "static/js/787.9851c762.chunk.js": "/meditrain/static/js/787.9851c762.chunk.js",
-    "index.html": "/meditrain/index.html",
-    "main.e6c13ad2.css.map": "/meditrain/static/css/main.e6c13ad2.css.map",
-    "main.e856f9e5.js.map": "/meditrain/static/js/main.e856f9e5.js.map",
-    "787.9851c762.chunk.js.map": "/meditrain/static/js/787.9851c762.chunk.js.map"
+    "main.css": "/meditrain/static/css/main.39c3d718.css",
+    "main.js": "/meditrain/static/js/main.fac2d59a.js",
+    "static/js/206.45437b76.chunk.js": "/meditrain/static/js/206.45437b76.chunk.js",
+    "index.html": "/meditrain/index.html"
   },
   "entrypoints": [
-    "static/css/main.e6c13ad2.css",
-    "static/js/main.e856f9e5.js"
+    "static/css/main.39c3d718.css",
+    "static/js/main.fac2d59a.js"
   ]
 }
