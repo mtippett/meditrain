@@ -14,10 +14,12 @@ const MuseData = React.forwardRef(function MuseData(
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState(null);
+  const [telemetry, setTelemetry] = useState(null);
   const clientRef = useRef(null);
   const subRef = useRef([]);
 
   async function safeDisconnect() {
+    setTelemetry(null);
     try {
       if (clientRef.current?.device && clientRef.current._onDisconnect) {
         clientRef.current.device.removeEventListener('gattserverdisconnected', clientRef.current._onDisconnect);
@@ -64,8 +66,11 @@ const MuseData = React.forwardRef(function MuseData(
 
       subRef.current = [];
       subRef.current.push(client.eegReadings.subscribe(data => onNewData(data)));
-      if (client.telemetryData && onTelemetry) {
-        subRef.current.push(client.telemetryData.subscribe(t => onTelemetry(t)));
+      if (client.telemetryData) {
+        subRef.current.push(client.telemetryData.subscribe(t => {
+          setTelemetry(t);
+          if (onTelemetry) onTelemetry(t);
+        }));
       }
       if (client.ppgReadings && onPpg) {
         subRef.current.push(client.ppgReadings.subscribe(p => onPpg(p)));
@@ -125,6 +130,9 @@ const MuseData = React.forwardRef(function MuseData(
       {isConnected && (
         <div className="inline-buttons">
           <p>Connected to EEG</p>
+          {telemetry && (
+            <span className="status-pill">Battery: {telemetry.batteryLevel.toFixed(0)}%</span>
+          )}
           <button onClick={onManualDisconnect}>Disconnect</button>
         </div>
       )}

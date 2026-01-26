@@ -37,13 +37,13 @@ NPERSEG = 1024
 NOVERLAP = NPERSEG // 2
 SPECTROGRAM_NFFT = 4096
 
-BANDS = [
-    {"key": "delta", "label": "Delta", "min": 0.5, "max": 4},
-    {"key": "theta", "label": "Theta", "min": 4, "max": 8},
-    {"key": "alpha", "label": "Alpha", "min": 8, "max": 12},
-    {"key": "beta", "label": "Beta", "min": 12, "max": 30},
-    {"key": "gamma", "label": "Gamma", "min": 30, "max": 50},
-]
+BANDS = {
+    "delta": {"label": "Delta", "range": (0.5, 4)},
+    "theta": {"label": "Theta", "range": (4, 8)},
+    "alpha": {"label": "Alpha", "range": (8, 12)},
+    "beta": {"label": "Beta", "range": (12, 30)},
+    "gamma": {"label": "Gamma", "range": (30, 50)},
+}
 
 
 def _get_time_range_str(diag_df: pd.DataFrame) -> str | None:
@@ -176,10 +176,11 @@ def compute_spectrogram_psd(
 def band_powers(freqs: np.ndarray, psd: np.ndarray) -> dict[str, dict[str, float]]:
     totals: dict[str, dict[str, float]] = {}
     total_power = 0.0
-    for band in BANDS:
-        band_mask = (freqs >= band["min"]) & (freqs < band["max"])
+    for key, band_info in BANDS.items():
+        min_freq, max_freq = band_info["range"]
+        band_mask = (freqs >= min_freq) & (freqs < max_freq)
         p = float(np.trapezoid(psd[band_mask], freqs[band_mask])) if np.any(band_mask) else 0.0
-        totals[band["key"]] = {"absolute": p, "relative": 0.0}
+        totals[key] = {"absolute": p, "relative": 0.0}
         total_power += p
     if total_power > 0:
         for key in totals:
@@ -578,16 +579,19 @@ def plot_artifact_overlays_and_metrics(
                 axes[0].plot(ts, subset["amplitude_range"], color="#f97316", linewidth=1.0)
                 axes[1].plot(ts, subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
                 axes[1].set_xlabel("Local Date/Time")
+                _format_time_axis(axes[0])
                 _format_time_axis(axes[1])
                 fig.autofmt_xdate()
             else:
                 axes[0].plot(subset["t_sec"], subset["amplitude_range"], color="#f97316", linewidth=1.0)
                 axes[1].plot(subset["t_sec"], subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
                 axes[1].set_xlabel("Seconds")
-            axes[0].axhline(amplitude_range_threshold, color="#ef4444", linestyle="--", linewidth=0.9)
+            if amplitude_range_threshold is not None:
+                axes[0].axhline(amplitude_range_threshold, color="#ef4444", linestyle="--", linewidth=0.9)
             axes[0].set_ylabel("Amplitude range")
             axes[0].grid(alpha=0.2)
-            axes[1].axhline(line_noise_ratio_threshold, color="#ef4444", linestyle="--", linewidth=0.9)
+            if line_noise_ratio_threshold is not None:
+                axes[1].axhline(line_noise_ratio_threshold, color="#ef4444", linestyle="--", linewidth=0.9)
             axes[1].set_ylabel("Line noise ratio")
             axes[1].grid(alpha=0.2)
             fig.suptitle(f"Artifact metrics: {label}")
@@ -938,6 +942,7 @@ def plot_cardiogram(
     fig_width: float = 12,
     title: str = "Cardiogram",
     ax=None,
+    start_timestamp: pd.Timestamp | None = None,
 ):
     import matplotlib.pyplot as plt
     if ax is None:
@@ -949,8 +954,18 @@ def plot_cardiogram(
     samples_plot = samples[::stride]
     t_plot = t[::stride]
 
-    ax.plot(t_plot, samples_plot, linewidth=0.8)
-    ax.set_xlabel("Time (s)")
+    if start_timestamp is not None:
+        ts = pd.to_datetime(start_timestamp) + pd.to_timedelta(t_plot, unit='s')
+        ts = to_local_datetime_index(pd.Series(ts))
+        ax.plot(ts, samples_plot, linewidth=0.8, color='#4ade80')
+        ax.set_xlabel("Local Date/Time")
+        _format_time_axis(ax)
+        if ax.get_figure() is not None:
+            ax.get_figure().autofmt_xdate()
+    else:
+        ax.plot(t_plot, samples_plot, linewidth=0.8, color='#4ade80')
+        ax.set_xlabel("Time (s)")
+
     ax.set_ylabel("Amplitude")
     ax.set_title(title)
     ax.grid(True, alpha=0.2)
@@ -964,6 +979,7 @@ def plot_heart_rate(
     fig_width: float = 12,
     title: str = "Heart Rate",
     ax=None,
+    start_timestamp: pd.Timestamp | None = None,
 ):
     import matplotlib.pyplot as plt
     if ax is None:
@@ -972,8 +988,18 @@ def plot_heart_rate(
     if "t_sec" not in hr_series.columns or "bpm" not in hr_series.columns:
         raise ValueError("hr_series dataframe must contain 't_sec' and 'bpm' columns")
 
-    ax.plot(hr_series["t_sec"], hr_series["bpm"])
-    ax.set_xlabel("Time (s)")
+    if start_timestamp is not None:
+        ts = pd.to_datetime(start_timestamp) + pd.to_timedelta(hr_series["t_sec"], unit='s')
+        ts = to_local_datetime_index(pd.Series(ts))
+        ax.plot(ts, hr_series["bpm"], color='#facc15', linewidth=1.4)
+        ax.set_xlabel("Local Date/Time")
+        _format_time_axis(ax)
+        if ax.get_figure() is not None:
+            ax.get_figure().autofmt_xdate()
+    else:
+        ax.plot(hr_series["t_sec"], hr_series["bpm"], color='#facc15', linewidth=1.4)
+        ax.set_xlabel("Time (s)")
+
     ax.set_ylabel("BPM")
     ax.set_title(title)
     ax.grid(True, alpha=0.2)
@@ -1289,9 +1315,9 @@ def plot_raw_traces_per_label(
                 ax.plot(ts[start:end], y[start:end], linewidth=0.8, color="#38bdf8")
         ax.set_ylabel(lbl)
         ax.grid(True, alpha=0.2)
+        _format_time_axis(ax)
 
     axes[-1].set_xlabel("Local Date/Time")
-    _format_time_axis(axes[-1])
     fig.autofmt_xdate()
     fig.suptitle(f"Raw {title_prefix} traces per channel (full session)", y=1.02)
     time_range_str = _get_time_range_str(diag_df)
@@ -1557,7 +1583,7 @@ def compute_band_power_timeseries(
 
 def _band_power_value_columns(relative: bool = True) -> list[str]:
     suffix = "rel" if relative else "abs"
-    return [f"{b['key']}_{suffix}" for b in BANDS]
+    return [f"{key}_{suffix}" for key in BANDS.keys()]
 
 
 def _smooth_band_power_df(
@@ -1706,9 +1732,9 @@ def compute_band_power_timeseries_combined(
 
     # Derive relative powers from the combined absolute powers (avoid averaging relative across channels)
     denom = avg[value_cols_abs].sum(axis=1)
-    for band in BANDS:
-        abs_col = f"{band['key']}_abs"
-        rel_col = f"{band['key']}_rel"
+    for key in BANDS:
+        abs_col = f"{key}_abs"
+        rel_col = f"{key}_rel"
         avg[rel_col] = np.where(denom > 0, avg[abs_col] / denom, 0.0)
 
     value_cols_rel = _band_power_value_columns(relative=True)
@@ -1752,7 +1778,7 @@ def plot_band_power_diagram(
     import matplotlib.dates as mdates
     # Use timestamp column if available, else fall back to t_sec
     target_history = target_history or {}
-    target_frames = {band["key"]: _normalize_target_history(target_history.get(band["key"], [])) for band in BANDS}
+    target_frames = {key: _normalize_target_history(target_history.get(key, [])) for key in BANDS}
     if "timestamp" in bp_plot.columns:
         ts = to_local_datetime_index(bp_plot["timestamp"])
         sens_axes = None
@@ -1769,8 +1795,8 @@ def plot_band_power_diagram(
                 sens_axes.set_ylim(sens_min - sens_pad, sens_max + sens_pad)
                 sens_axes.set_ylabel("Sensitivity")
                 sens_axes.grid(False)
-        for i, band in enumerate(BANDS):
-            hist_df = target_frames.get(band["key"])
+        for i, (key, band) in enumerate(BANDS.items()):
+            hist_df = target_frames.get(key)
             if hist_df is None or hist_df.empty:
                 continue
             hist_local = to_local_datetime_index(hist_df["timestamp"])
@@ -1801,7 +1827,7 @@ def plot_band_power_diagram(
                     alpha=0.7,
                     linestyle="--",
                 )
-        for i, band in enumerate(BANDS):
+        for i, (key, band) in enumerate(BANDS.items()):
             y = bp_plot[value_cols[i]].to_numpy(dtype=float)
             if len(ts) < 2:
                 ax.plot(ts, y, linewidth=1.4, color=colors[i % len(colors)], label=band["label"])
@@ -1840,8 +1866,8 @@ def plot_band_power_diagram(
                     sens_axes.set_ylim(sens_min - sens_pad, sens_max + sens_pad)
                     sens_axes.set_ylabel("Sensitivity")
                     sens_axes.grid(False)
-                for i, band in enumerate(BANDS):
-                    hist_df = target_frames.get(band["key"])
+                for i, (key, band) in enumerate(BANDS.items()):
+                    hist_df = target_frames.get(key)
                     if hist_df is None or hist_df.empty:
                         continue
                     t_hist = (hist_df["timestamp"] - t0).dt.total_seconds()
@@ -1872,7 +1898,7 @@ def plot_band_power_diagram(
                             alpha=0.7,
                             linestyle="--",
                         )
-        for i, band in enumerate(BANDS):
+        for i, (key, band) in enumerate(BANDS.items()):
             ax.plot(t_sec, bp_plot[value_cols[i]], label=band["label"], linewidth=1.4, color=colors[i % len(colors)])
         ax.set_xlabel("Time (s)")
     ax.set_title(title + (f" (avg={avg_sec}s)" if (avg_sec is not None and avg_sec > 0) else ""))
