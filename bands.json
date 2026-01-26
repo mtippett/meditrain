@@ -1,0 +1,7 @@
+[
+  { "key": "delta", "label": "Delta", "min": 0.5, "max": 4 },
+  { "key": "theta", "label": "Theta", "min": 4, "max": 8 },
+  { "key": "alpha", "label": "Alpha", "min": 8, "max": 12 },
+  { "key": "beta", "label": "Beta", "min": 12, "max": 30 },
+  { "key": "gamma", "label": "Gamma", "min": 30, "max": 50 }
+]
