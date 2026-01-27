@@ -1,12 +1,12 @@
 {
   "files": {
     "main.css": "/meditrain/static/css/main.0591c409.css",
-    "main.js": "/meditrain/static/js/main.aa8cfa22.js",
+    "main.js": "/meditrain/static/js/main.625b1208.js",
     "static/js/206.45437b76.chunk.js": "/meditrain/static/js/206.45437b76.chunk.js",
     "index.html": "/meditrain/index.html"
   },
   "entrypoints": [
     "static/css/main.0591c409.css",
-    "static/js/main.aa8cfa22.js"
+    "static/js/main.625b1208.js"
   ]
 }
