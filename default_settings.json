@@ -1,5 +1,10 @@
 {
   "selectedChannels": [],
+  "selectedPpgChannels": [
+    "IR",
+    "AMBIENT",
+    "RED"
+  ],
   "trainingTargets": [],
   "bandWindowSec": 300,
   "spectrogramWindowSec": 300,
@@ -16,7 +21,7 @@
   "lineNoiseHz": 60,
   "lineNoiseBandHz": 2,
   "lineNoiseMaxHz": 80,
-  "lineNoiseRatioThreshold": 0.5,
+  "lineNoiseRatioThreshold": 1.0,
   "rejectionOverlayMode": "auto",
   "rejectionOverlayMaxWindows": 200,
   "showBandPower": false,
