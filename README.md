@@ -46,6 +46,14 @@ feedback on your power levels.
 
 Docs are in the [docs](docs) directory.
 
+## Code Quality
+
+Run ESLint with:
+
+```
+npx eslint .
+```
+
 ## Contributing
 
 This project is open source and contributions are welcome! If you have ideas 

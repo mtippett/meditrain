@@ -8,12 +8,26 @@ import BandPeriodograms from './BandPeriodograms';
 import TimeSeriesLineChart from './ui/TimeSeriesLineChart';
 import EEGTraceChart from './ui/EEGTraceChart';
 import { PanelControlButton, PanelControls, PanelHeading } from './ui/PanelControls';
+import useEegProcessing from './hooks/useEegProcessing';
+import usePpgProcessing from './hooks/usePpgProcessing';
 
 import './App.css';
 import { STANDARD_BANDS } from './constants/bands';
 
+const TELEMETRY_WINDOW_SEC = 60;
+const HEART_OBSERVATORY_WINDOW_SEC = 60;
+
 const FALLBACK_SETTINGS = {
   selectedChannels: [],
+  selectedPpgChannels: ['IR', 'AMBIENT', 'RED'],
+  shareTelemetry: true,
+  shareAccelerometer: true,
+  shareGyro: true,
+  ppgSensorMapping: {
+    irChannel: 1,
+    redChannel: 2,
+    greenChannel: 0
+  },
   trainingTargets: [],
   bandWindowSec: 300,
   spectrogramWindowSec: 300,
@@ -21,7 +35,7 @@ const FALLBACK_SETTINGS = {
   deltaSmoothingSec: 20,
   eegTraceWindow: 4096,
   eegFftWindow: 1024,
-  ppgTraceWindow: 1024,
+  ppgTraceWindow: 3840,
   notchHz: 50,
   spectrogramUseCachedSlices: true,
   artifactWindowSec: 2,
@@ -73,8 +87,15 @@ function resolveTargetValue(target, snapshotMap) {
 }
 
 function App() {
-  const [eegData, setEEGData] = useState([]);
   const [selectedChannels, setSelectedChannels] = useState(DEFAULT_SETTINGS.selectedChannels);
+  const [selectedPpgChannels, setSelectedPpgChannels] = useState(DEFAULT_SETTINGS.selectedPpgChannels);
+  const [shareTelemetry, setShareTelemetry] = useState(DEFAULT_SETTINGS.shareTelemetry);
+  const [shareAccelerometer, setShareAccelerometer] = useState(DEFAULT_SETTINGS.shareAccelerometer);
+  const [shareGyro, setShareGyro] = useState(DEFAULT_SETTINGS.shareGyro);
+  const [ppgSensorMapping, setPpgSensorMapping] = useState(DEFAULT_SETTINGS.ppgSensorMapping);
+  const [deviceInfo, setDeviceInfo] = useState(null);
+  const [ppgLabelMap, setPpgLabelMap] = useState(null);
+  const [deviceType, setDeviceType] = useState(null);
   const [trainingTargets, setTrainingTargets] = useState(DEFAULT_SETTINGS.trainingTargets);
   const [bandSnapshots, setBandSnapshots] = useState([]);
   const [bandHistory, setBandHistory] = useState({});
@@ -98,9 +119,144 @@ function App() {
   const [rejectionOverlayMode, setRejectionOverlayMode] = useState(DEFAULT_SETTINGS.rejectionOverlayMode);
   const [rejectionOverlayMaxWindows, setRejectionOverlayMaxWindows] = useState(DEFAULT_SETTINGS.rejectionOverlayMaxWindows);
   const [audioEnabled, setAudioEnabled] = useState(false);
+  const [autoDownloadEnabled, setAutoDownloadEnabled] = useState(false);
+  const [streamStatus, setStreamStatus] = useState({
+    isStreaming: false,
+    dataStale: false,
+    isConnected: false,
+    isConnecting: false
+  });
+  const [sharedTelemetry, setSharedTelemetry] = useState(null);
+  const [sharedAccelerometer, setSharedAccelerometer] = useState(null);
+  const [sharedGyro, setSharedGyro] = useState(null);
+  const lastEegReceivedAtRef = useRef(null);
+  const eegPacketsReceivedRef = useRef(0);
+  const lastDownloadedPacketRef = useRef(0);
+  const nextAutoDownloadAtRef = useRef(null);
+  const downloadSamplesRef = useRef(null);
+  const [autoDownloadCountdownSec, setAutoDownloadCountdownSec] = useState(null);
+  const [downloadLogs, setDownloadLogs] = useState([]);
+  const [batteryHistory, setBatteryHistory] = useState([]);
+  const [tempHistory, setTempHistory] = useState([]);
+  const [accelHistoryX, setAccelHistoryX] = useState([]);
+  const [accelHistoryY, setAccelHistoryY] = useState([]);
+  const [accelHistoryZ, setAccelHistoryZ] = useState([]);
+  const [gyroHistoryX, setGyroHistoryX] = useState([]);
+  const [gyroHistoryY, setGyroHistoryY] = useState([]);
+  const [gyroHistoryZ, setGyroHistoryZ] = useState([]);
+
+  const sampleRateHz = 256;
+  const ppgSampleRateHz = 64;
+  const heartObservatoryWindowMs = HEART_OBSERVATORY_WINDOW_SEC * 1000;
+  const heartObservatorySamples = Math.max(1, Math.round(ppgSampleRateHz * HEART_OBSERVATORY_WINDOW_SEC));
+  const autoDownloadMs = 60000;
+  const {
+    eegData,
+    lastFFT,
+    channelMaps,
+    handleChannelMaps,
+    handleEegPacket: handleEegPacketRaw
+  } = useEegProcessing({
+    sampleRateHz,
+    fftWindow: eegFftWindow,
+    traceWindow: eegTraceWindow,
+    notchHz,
+    spectrogramWindowSec,
+    artifactWindowSec,
+    artifactStepSec,
+    amplitudeRangeThreshold,
+    lineNoiseHz,
+    lineNoiseBandHz,
+    lineNoiseMaxHz,
+    lineNoiseRatioThreshold,
+    autoDownloadMs
+  });
+  const {
+    ppgChannels,
+    heartData,
+    handlePpgPacket: handlePpgPacketRaw
+  } = usePpgProcessing({
+    ppgTraceWindow,
+    sampleRateHz: ppgSampleRateHz,
+    autoDownloadMs,
+    enabledPpgLabels: selectedPpgChannels,
+    sensorMapping: ppgSensorMapping
+  });
+
+  const handleEegPacket = useCallback((data) => {
+    lastEegReceivedAtRef.current = Date.now();
+    eegPacketsReceivedRef.current += 1;
+    handleEegPacketRaw(data);
+  }, [handleEegPacketRaw]);
+
+  const handlePpgPacket = useCallback((data) => {
+    handlePpgPacketRaw(data);
+  }, [handlePpgPacketRaw]);
+
+  const handleTelemetryPacket = useCallback((data) => {
+    setSharedTelemetry(data);
+  }, []);
+
+  const handleAccelerometerPacket = useCallback((data) => {
+    setSharedAccelerometer(data);
+  }, []);
+
+  const handleGyroPacket = useCallback((data) => {
+    setSharedGyro(data);
+  }, []);
+
+  const handleDeviceInfo = useCallback((info) => {
+    setDeviceInfo(info?.deviceInfo || null);
+    setPpgLabelMap(info?.ppgLabelMap || null);
+    setDeviceType(info?.deviceType || null);
+    if (info?.ppgLabelMap?.mapping) {
+      const mapping = info.ppgLabelMap.mapping;
+      setPpgSensorMapping({
+        irChannel: mapping.infrared,
+        redChannel: mapping.red,
+        greenChannel: mapping.ambient
+      });
+    }
+  }, []);
+
+  const pushHistoryPoint = useCallback((setter, value, windowMs = TELEMETRY_WINDOW_SEC * 1000) => {
+    if (!Number.isFinite(value)) return;
+    const now = Date.now();
+    setter((prev) => {
+      const next = [...prev, { t: now, v: value }].filter(p => p.t >= now - windowMs);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!sharedTelemetry) return;
+    if (Number.isFinite(sharedTelemetry.batteryLevel)) {
+      pushHistoryPoint(setBatteryHistory, sharedTelemetry.batteryLevel);
+    }
+    if (Number.isFinite(sharedTelemetry.temperature)) {
+      pushHistoryPoint(setTempHistory, sharedTelemetry.temperature);
+    }
+  }, [sharedTelemetry, pushHistoryPoint]);
+
+  useEffect(() => {
+    if (!sharedAccelerometer?.samples || sharedAccelerometer.samples.length === 0) return;
+    const last = sharedAccelerometer.samples[sharedAccelerometer.samples.length - 1];
+    if (!last) return;
+    pushHistoryPoint(setAccelHistoryX, last.x);
+    pushHistoryPoint(setAccelHistoryY, last.y);
+    pushHistoryPoint(setAccelHistoryZ, last.z);
+  }, [sharedAccelerometer, pushHistoryPoint]);
+
+  useEffect(() => {
+    if (!sharedGyro?.samples || sharedGyro.samples.length === 0) return;
+    const last = sharedGyro.samples[sharedGyro.samples.length - 1];
+    if (!last) return;
+    pushHistoryPoint(setGyroHistoryX, last.x);
+    pushHistoryPoint(setGyroHistoryY, last.y);
+    pushHistoryPoint(setGyroHistoryZ, last.z);
+  }, [sharedGyro, pushHistoryPoint]);
 
   const [targetSensitivity, setTargetSensitivity] = useState({});
-  const [lastFFT, setLastFFT] = useState(null);
   const audioCtxRef = useRef(null);
   const gainRef = useRef(null);
   const noiseRef = useRef(null);
@@ -115,13 +271,6 @@ function App() {
   const [showArtifactDiagnostics, setShowArtifactDiagnostics] = useState(DEFAULT_SETTINGS.showArtifactDiagnostics);
   const [deviceDebug, setDeviceDebug] = useState(null);
   const [fullscreenPanel, setFullscreenPanel] = useState(null);
-  const [heartData, setHeartData] = useState({
-    heartRateBpm: null,
-    combinedPpg: null,
-    cardiogramPpg: null,
-    ppgChannels: [],
-    sampleRateHz: 64
-  });
   const [heartRateHistory, setHeartRateHistory] = useState([]);
   const [bandTargetPresets, setBandTargetPresets] = useState({ profiles: [] });
   const [presetsLoading, setPresetsLoading] = useState(true);
@@ -136,6 +285,13 @@ function App() {
   function applySettings(settings) {
     const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
     setSelectedChannels(Array.isArray(merged.selectedChannels) ? merged.selectedChannels : DEFAULT_SETTINGS.selectedChannels);
+    setSelectedPpgChannels(Array.isArray(merged.selectedPpgChannels) ? merged.selectedPpgChannels : DEFAULT_SETTINGS.selectedPpgChannels);
+    if (typeof merged.shareTelemetry === 'boolean') setShareTelemetry(merged.shareTelemetry);
+    if (typeof merged.shareAccelerometer === 'boolean') setShareAccelerometer(merged.shareAccelerometer);
+    if (typeof merged.shareGyro === 'boolean') setShareGyro(merged.shareGyro);
+    if (merged.ppgSensorMapping && typeof merged.ppgSensorMapping === 'object') {
+      setPpgSensorMapping(merged.ppgSensorMapping);
+    }
     setTrainingTargets(Array.isArray(merged.trainingTargets) ? merged.trainingTargets : DEFAULT_SETTINGS.trainingTargets);
     if (typeof merged.bandWindowSec === 'number') setBandWindowSec(merged.bandWindowSec);
     if (typeof merged.spectrogramWindowSec === 'number') setSpectrogramWindowSec(merged.spectrogramWindowSec);
@@ -197,11 +353,6 @@ function App() {
   }, []);
 
 
-  function onPeriodgramUpdated(updatedEEGData) {
-    setEEGData([...updatedEEGData]); // Likely too much data is copied
-    setLastFFT(Date.now());
-  }
-
   const activeElectrodes = eegData.length;
   const totalSamples = eegData.reduce((sum, channel) => sum + (channel.samples?.length || 0), 0);
   const totalPeriodograms = eegData.reduce((sum, channel) => sum + (channel.periodograms?.length || 0), 0);
@@ -211,9 +362,23 @@ function App() {
       eegData.map((c) => c.label || c.electrode)
     )
   );
+  const availablePpgChannels = Array.from(
+    new Set(
+      ppgChannels.map((c) => c.label)
+    )
+  );
 
   function onToggleChannel(label) {
     setSelectedChannels((prev) => {
+      if (prev.includes(label)) {
+        return prev.filter((l) => l !== label);
+      }
+      return [...prev, label];
+    });
+  }
+
+  function onTogglePpgChannel(label) {
+    setSelectedPpgChannels((prev) => {
       if (prev.includes(label)) {
         return prev.filter((l) => l !== label);
       }
@@ -228,6 +393,19 @@ function App() {
       setSelectedChannels(defaultEnabled);
     }
   }, [availableChannels, selectedChannels.length]);
+
+  // Default to all PPG channels once they appear
+  useEffect(() => {
+    if (availablePpgChannels.length > 0 && selectedPpgChannels.length === 0) {
+      const preferred = ['IR', 'AMBIENT', 'RED'].filter((label) => availablePpgChannels.includes(label));
+      setSelectedPpgChannels(preferred.length > 0 ? preferred : availablePpgChannels);
+    }
+  }, [availablePpgChannels, selectedPpgChannels.length]);
+
+  useEffect(() => {
+    if (availablePpgChannels.length === 0) return;
+    setSelectedPpgChannels((prev) => prev.filter((label) => availablePpgChannels.includes(label)));
+  }, [availablePpgChannels]);
 
   // Load defaults and then apply persisted settings
   useEffect(() => {
@@ -265,6 +443,11 @@ function App() {
   const handleSaveSettings = useCallback(() => {
     const payload = {
       selectedChannels,
+      selectedPpgChannels,
+      shareTelemetry,
+      shareAccelerometer,
+      shareGyro,
+      ppgSensorMapping,
       trainingTargets,
       bandWindowSec,
       spectrogramWindowSec,
@@ -292,6 +475,11 @@ function App() {
     localStorage.setItem('meditrain-settings', JSON.stringify(payload));
   }, [
     selectedChannels,
+    selectedPpgChannels,
+    shareTelemetry,
+    shareAccelerometer,
+    shareGyro,
+    ppgSensorMapping,
     trainingTargets,
     bandWindowSec,
     spectrogramWindowSec,
@@ -330,17 +518,23 @@ function App() {
       if (last && now - last.t < 1000) {
         return prev;
       }
-      const cutoff = now - 5 * 60 * 1000;
+      const cutoff = now - heartObservatoryWindowMs;
       const next = [...prev, { t: now, v: heartData.heartRateBpm }].filter(p => p.t >= cutoff);
       return next;
     });
-  }, [heartData.heartRateBpm]);
+  }, [heartData.heartRateBpm, heartObservatoryWindowMs]);
 
   useEffect(() => {
     if (eegTraceWindow < eegFftWindow) {
       setEegTraceWindow(eegFftWindow);
     }
   }, [eegFftWindow, eegTraceWindow]);
+
+  useEffect(() => {
+    if (ppgTraceWindow < heartObservatorySamples) {
+      setPpgTraceWindow(heartObservatorySamples);
+    }
+  }, [heartObservatorySamples, ppgTraceWindow]);
 
   const filteredEegData =
     selectedChannels.length === 0
@@ -712,6 +906,25 @@ function App() {
     targetHistory,
     targetHistoryById,
     targetReadings,
+    telemetry: sharedTelemetry,
+    accelerometer: sharedAccelerometer,
+    gyroscope: sharedGyro,
+    telemetryHistory: {
+      battery: batteryHistory,
+      temperature: tempHistory
+    },
+    accelerometerHistory: {
+      x: accelHistoryX,
+      y: accelHistoryY,
+      z: accelHistoryZ
+    },
+    gyroscopeHistory: {
+      x: gyroHistoryX,
+      y: gyroHistoryY,
+      z: gyroHistoryZ
+    },
+    deviceInfo,
+    ppgLabelMap,
     config: {
       bandWindowSec,
       bandSmoothingSec,
@@ -730,7 +943,8 @@ function App() {
       lineNoiseMaxHz,
       lineNoiseRatioThreshold,
       rejectionOverlayMode,
-      rejectionOverlayMaxWindows
+      rejectionOverlayMaxWindows,
+      ppgSensorMapping
     }
   }), [
     effectiveTargets,
@@ -738,6 +952,19 @@ function App() {
     targetHistory,
     targetHistoryById,
     targetReadings,
+    sharedTelemetry,
+    sharedAccelerometer,
+    sharedGyro,
+    batteryHistory,
+    tempHistory,
+    accelHistoryX,
+    accelHistoryY,
+    accelHistoryZ,
+    gyroHistoryX,
+    gyroHistoryY,
+    gyroHistoryZ,
+    deviceInfo,
+    ppgLabelMap,
     bandWindowSec,
     bandSmoothingSec,
     deltaSmoothingSec,
@@ -755,8 +982,244 @@ function App() {
     lineNoiseMaxHz,
     lineNoiseRatioThreshold,
     rejectionOverlayMode,
-    rejectionOverlayMaxWindows
+    rejectionOverlayMaxWindows,
+    ppgSensorMapping
   ]);
+
+  const downloadSamples = useCallback(({ requireFullWindow = false } = {}) => {
+    const last = lastEegReceivedAtRef.current;
+    if (!last) return false;
+    if (eegPacketsReceivedRef.current <= lastDownloadedPacketRef.current) return false;
+
+    const downloadWindowSamples = Math.ceil((autoDownloadMs / 1000) * sampleRateHz);
+    let active = (eegData || []).filter(c => c && c.samples && c.samples.length > 0);
+    if (selectedChannels.length > 0) {
+      active = active.filter(c => selectedChannels.includes(c.label || c.electrode));
+    }
+    if (requireFullWindow) {
+      active = active.filter(c => c.samples.length >= downloadWindowSamples);
+    }
+    if (active.length === 0) return false;
+
+    const samplePeriodMs = 1000 / sampleRateHz;
+    const captureEndedAt = new Date(last);
+    const availableCounts = active.map(c => c.samples.length);
+    const windowSamples = requireFullWindow
+      ? downloadWindowSamples
+      : Math.min(...availableCounts);
+    if (!windowSamples || windowSamples <= 0) return false;
+
+    const captureStartedAtIso = new Date(
+      captureEndedAt.getTime() - Math.max(windowSamples - 1, 0) * samplePeriodMs
+    ).toISOString();
+
+    const channelLabels = active.map(c => c.label || c.electrode);
+    const tsSlug = captureStartedAtIso.replace(/[:.]/g, '-');
+    const baseName = `sub-01_ses-01_task-meditrain_run-${tsSlug}_eeg`;
+    const ppgBaseName = baseName.replace('_eeg', '_ppg');
+    const dataFile = `${baseName}.eeg`;
+    const headerFile = `${baseName}.vhdr`;
+    const markerFile = `${baseName}.vmrk`;
+    const channelsFile = `${baseName.replace('_eeg', '_channels')}.tsv`;
+    const sidecarFile = `${baseName}.json`;
+    const ppgDataFile = `${ppgBaseName}.tsv`;
+    const ppgSidecarFile = `${ppgBaseName}.json`;
+
+    const triggerDownload = (blob, filename) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    };
+
+    const alignedSamples = active.map(c => c.samples.slice(-windowSamples));
+    const channelCount = alignedSamples.length;
+    const interleaved = new Float32Array(windowSamples * channelCount);
+    for (let i = 0; i < windowSamples; i += 1) {
+      for (let ch = 0; ch < channelCount; ch += 1) {
+        interleaved[i * channelCount + ch] = alignedSamples[ch][i] || 0;
+      }
+    }
+
+    const headerLines = [
+      'Brain Vision Data Exchange Header File Version 1.0',
+      '; Generated by meditrain',
+      '',
+      '[Common Infos]',
+      `DataFile=${dataFile}`,
+      `MarkerFile=${markerFile}`,
+      'DataFormat=BINARY',
+      'DataOrientation=MULTIPLEXED',
+      'DataType=FLOAT32',
+      `NumberOfChannels=${channelCount}`,
+      `SamplingInterval=${Math.round(1000000 / sampleRateHz)}`,
+      '',
+      '[Channel Infos]',
+      ...channelLabels.map((label, idx) => `Ch${idx + 1}=${label},,uV`)
+    ];
+
+    const markerLines = [
+      'Brain Vision Data Exchange Marker File, Version 1.0',
+      '; Generated by meditrain',
+      '',
+      '[Common Infos]',
+      `DataFile=${dataFile}`,
+      '',
+      '[Marker Infos]',
+      'Mk1=New Segment,,1,1,0,0'
+    ];
+
+    const sidecar = {
+      SamplingFrequency: sampleRateHz,
+      PowerLineFrequency: 60,
+      EEGReference: 'unknown',
+      EEGGround: 'unknown',
+      SoftwareFilters: 'none',
+      RecordingType: 'continuous',
+      TaskName: 'meditrain',
+      AcquisitionDateTime: captureStartedAtIso,
+      NotchHz: notchHz
+    };
+    if (downloadMetadata) {
+      sidecar.TrainingTargets = downloadMetadata.trainingTargets || [];
+      sidecar.TrainingTargetMetrics = downloadMetadata.targetMetrics || {};
+      sidecar.TrainingTargetHistory = downloadMetadata.targetHistory || {};
+      sidecar.TrainingTargetReadings = downloadMetadata.targetReadings || [];
+      sidecar.Config = downloadMetadata.config || {};
+      if (downloadMetadata.telemetry) sidecar.Telemetry = downloadMetadata.telemetry;
+      if (downloadMetadata.accelerometer) sidecar.Accelerometer = downloadMetadata.accelerometer;
+      if (downloadMetadata.gyroscope) sidecar.Gyroscope = downloadMetadata.gyroscope;
+      if (downloadMetadata.telemetryHistory) sidecar.TelemetryHistory = downloadMetadata.telemetryHistory;
+      if (downloadMetadata.accelerometerHistory) sidecar.AccelerometerHistory = downloadMetadata.accelerometerHistory;
+      if (downloadMetadata.gyroscopeHistory) sidecar.GyroscopeHistory = downloadMetadata.gyroscopeHistory;
+      if (downloadMetadata.deviceInfo) sidecar.DeviceInfo = downloadMetadata.deviceInfo;
+      if (downloadMetadata.ppgLabelMap) sidecar.PpgLabelMap = downloadMetadata.ppgLabelMap;
+    }
+
+    const channelHeader = [
+      'name',
+      'type',
+      'units',
+      'sampling_frequency',
+      'low_cutoff',
+      'high_cutoff',
+      'reference'
+    ].join('\t');
+    const channelLines = channelLabels.map(label =>
+      [
+        label,
+        'EEG',
+        'uV',
+        sampleRateHz,
+        'n/a',
+        'n/a',
+        'unknown'
+      ].join('\t')
+    );
+
+    triggerDownload(new Blob([interleaved.buffer], { type: 'application/octet-stream' }), dataFile);
+    triggerDownload(new Blob([headerLines.join('\n')], { type: 'text/plain' }), headerFile);
+    triggerDownload(new Blob([markerLines.join('\n')], { type: 'text/plain' }), markerFile);
+    triggerDownload(new Blob([JSON.stringify(sidecar, null, 2)], { type: 'application/json' }), sidecarFile);
+    triggerDownload(new Blob([[channelHeader, ...channelLines].join('\n')], { type: 'text/tab-separated-values' }), channelsFile);
+
+    const ppgActive = (ppgChannels || []).filter(c => c && c.samples && c.samples.length > 0);
+    if (ppgActive.length > 0) {
+      const windowDurationSec = windowSamples / sampleRateHz;
+      const ppgWindowSamples = Math.min(
+        Math.round(windowDurationSec * ppgSampleRateHz),
+        ...ppgActive.map(c => c.samples.length)
+      );
+      if (ppgWindowSamples > 0) {
+        const ppgAligned = ppgActive.map(c => c.samples.slice(-ppgWindowSamples));
+        const ppgHeader = ppgActive.map(c => c.label).join('\t');
+        const ppgRows = [];
+        for (let i = 0; i < ppgWindowSamples; i += 1) {
+          ppgRows.push(ppgAligned.map(ch => ch[i] ?? '').join('\t'));
+        }
+        const ppgSidecar = {
+          SamplingFrequency: ppgSampleRateHz,
+          PowerLineFrequency: 60,
+          RecordingType: 'continuous',
+          TaskName: 'meditrain',
+          AcquisitionDateTime: captureStartedAtIso,
+          Columns: ppgActive.map(c => c.label)
+        };
+        triggerDownload(new Blob([[ppgHeader, ...ppgRows].join('\n')], { type: 'text/tab-separated-values' }), ppgDataFile);
+        triggerDownload(new Blob([JSON.stringify(ppgSidecar, null, 2)], { type: 'application/json' }), ppgSidecarFile);
+      }
+    }
+
+    lastDownloadedPacketRef.current = eegPacketsReceivedRef.current;
+    nextAutoDownloadAtRef.current = Date.now() + autoDownloadMs;
+
+    const windowSec = Math.floor(windowSamples / sampleRateHz);
+    setDownloadLogs((prev) => {
+      const entry = {
+        t: Date.now(),
+        windowSec
+      };
+      return [...prev, entry].slice(-20);
+    });
+    return true;
+  }, [
+    autoDownloadMs,
+    downloadMetadata,
+    eegData,
+    notchHz,
+    ppgChannels,
+    ppgSampleRateHz,
+    sampleRateHz,
+    selectedChannels
+  ]);
+
+  useEffect(() => {
+    downloadSamplesRef.current = downloadSamples;
+  }, [downloadSamples]);
+
+  useEffect(() => {
+    if (!autoDownloadEnabled) return undefined;
+    if (!streamStatus.isStreaming) return undefined;
+    if (autoDownloadMs <= 0) return undefined;
+    if (!nextAutoDownloadAtRef.current) {
+      nextAutoDownloadAtRef.current = Date.now() + autoDownloadMs;
+    }
+    const timer = setInterval(() => {
+      if (eegPacketsReceivedRef.current === lastDownloadedPacketRef.current) return;
+      if (downloadSamplesRef.current) downloadSamplesRef.current({ requireFullWindow: true });
+    }, autoDownloadMs);
+
+    return () => {
+      clearInterval(timer);
+      nextAutoDownloadAtRef.current = null;
+    };
+  }, [autoDownloadEnabled, autoDownloadMs, streamStatus.isStreaming]);
+
+  useEffect(() => {
+    if (!autoDownloadEnabled || !streamStatus.isStreaming || autoDownloadMs <= 0) {
+      nextAutoDownloadAtRef.current = null;
+      setAutoDownloadCountdownSec(null);
+      return undefined;
+    }
+    const tick = () => {
+      if (!nextAutoDownloadAtRef.current) {
+        nextAutoDownloadAtRef.current = Date.now() + autoDownloadMs;
+      }
+      if (!nextAutoDownloadAtRef.current) {
+        setAutoDownloadCountdownSec(null);
+        return;
+      }
+      const remainingMs = Math.max(0, nextAutoDownloadAtRef.current - Date.now());
+      setAutoDownloadCountdownSec(Math.ceil(remainingMs / 1000));
+    };
+    tick();
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [autoDownloadEnabled, autoDownloadMs, streamStatus.isStreaming]);
 
   function upsertTarget(target) {
     setTrainingTargets(prev => {
@@ -952,26 +1415,39 @@ function App() {
           <h3>Live Device & Signal</h3>
           <p>Connect, stream EEG, and preview channels without leaving this dashboard.</p>
           <DeviceControl
-            onPeriodgramUpdated={onPeriodgramUpdated}
-            onPpgUpdate={setHeartData}
+            onEegPacket={handleEegPacket}
+            onPpgPacket={handlePpgPacket}
+            onChannelMap={handleChannelMaps}
+            onTelemetryPacket={handleTelemetryPacket}
+            onAccelerometerPacket={handleAccelerometerPacket}
+            onGyroPacket={handleGyroPacket}
+            onDeviceInfo={handleDeviceInfo}
+            onStreamStatus={setStreamStatus}
+            eegData={eegData}
+            ppgChannels={ppgChannels}
+            channelMaps={channelMaps}
             onDeviceDebug={setDeviceDebug}
             selectedChannels={selectedChannels}
             onToggleChannel={onToggleChannel}
             availableChannels={availableChannels}
+            availablePpgChannels={availablePpgChannels}
+            selectedPpgChannels={selectedPpgChannels}
+            onTogglePpgChannel={onTogglePpgChannel}
+            shareTelemetry={shareTelemetry}
+            shareAccelerometer={shareAccelerometer}
+            shareGyro={shareGyro}
+            onToggleShareTelemetry={() => setShareTelemetry(prev => !prev)}
+            onToggleShareAccelerometer={() => setShareAccelerometer(prev => !prev)}
+            onToggleShareGyro={() => setShareGyro(prev => !prev)}
+            deviceInfo={deviceInfo}
+            deviceType={deviceType}
+            ppgLabelMap={ppgLabelMap}
             lastFFT={lastFFT}
+            sampleRateHz={sampleRateHz}
+            ppgSampleRateHz={ppgSampleRateHz}
             traceWindow={eegTraceWindow}
             fftWindow={eegFftWindow}
             ppgTraceWindow={ppgTraceWindow}
-            spectrogramWindowSec={spectrogramWindowSec}
-            notchHz={notchHz}
-            downloadMetadata={downloadMetadata}
-            artifactWindowSec={artifactWindowSec}
-            artifactStepSec={artifactStepSec}
-            amplitudeRangeThreshold={amplitudeRangeThreshold}
-            lineNoiseHz={lineNoiseHz}
-            lineNoiseBandHz={lineNoiseBandHz}
-            lineNoiseMaxHz={lineNoiseMaxHz}
-            lineNoiseRatioThreshold={lineNoiseRatioThreshold}
           />
         </div>
       </header>
@@ -1055,8 +1531,74 @@ function App() {
           <TrainingView />
         </section>
 
+        <section className={`panel ${fullscreenPanel === 'telemetry' ? 'fullscreen' : ''}`}>
+          <PanelHeading title="Telemetry" subtitle="Battery, temperature, motion sensors">
+            <PanelControls>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'telemetry'}
+                ariaLabel={fullscreenPanel === 'telemetry' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'telemetry' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'telemetry' ? null : 'telemetry')}
+              >
+                {fullscreenPanel === 'telemetry' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
+          <p className="subdued">Latest sensor readings plus rolling charts for device health.</p>
+          <div className="inline-status" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
+            <span className="status-pill">
+              Battery: {sharedTelemetry?.batteryLevel != null ? `${sharedTelemetry.batteryLevel}%` : '—'}
+            </span>
+            <span className="status-pill">
+              Temp: {sharedTelemetry?.temperature != null ? `${sharedTelemetry.temperature.toFixed(1)}°C` : '—'}
+            </span>
+            <span className="status-pill">
+              Accel: {sharedAccelerometer?.samples?.length
+                ? `x${sharedAccelerometer.samples.at(-1)?.x?.toFixed(2) ?? '—'} y${sharedAccelerometer.samples.at(-1)?.y?.toFixed(2) ?? '—'} z${sharedAccelerometer.samples.at(-1)?.z?.toFixed(2) ?? '—'}`
+                : '—'}
+            </span>
+            <span className="status-pill">
+              Gyro: {sharedGyro?.samples?.length
+                ? `x${sharedGyro.samples.at(-1)?.x?.toFixed(2) ?? '—'} y${sharedGyro.samples.at(-1)?.y?.toFixed(2) ?? '—'} z${sharedGyro.samples.at(-1)?.z?.toFixed(2) ?? '—'}`
+                : '—'}
+            </span>
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Battery (%)</p>
+            <TimeSeriesLineChart points={batteryHistory} windowSec={TELEMETRY_WINDOW_SEC} height={140} />
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Temperature (°C)</p>
+            <TimeSeriesLineChart points={tempHistory} windowSec={TELEMETRY_WINDOW_SEC} height={140} />
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Accelerometer X</p>
+            <TimeSeriesLineChart points={accelHistoryX} windowSec={TELEMETRY_WINDOW_SEC} height={120} />
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Accelerometer Y</p>
+            <TimeSeriesLineChart points={accelHistoryY} windowSec={TELEMETRY_WINDOW_SEC} height={120} />
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Accelerometer Z</p>
+            <TimeSeriesLineChart points={accelHistoryZ} windowSec={TELEMETRY_WINDOW_SEC} height={120} />
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Gyroscope X</p>
+            <TimeSeriesLineChart points={gyroHistoryX} windowSec={TELEMETRY_WINDOW_SEC} height={120} />
+          </div>
+          <div className="chart-block" style={{ marginBottom: 10 }}>
+            <p className="chart-label">Gyroscope Y</p>
+            <TimeSeriesLineChart points={gyroHistoryY} windowSec={TELEMETRY_WINDOW_SEC} height={120} />
+          </div>
+          <div className="chart-block">
+            <p className="chart-label">Gyroscope Z</p>
+            <TimeSeriesLineChart points={gyroHistoryZ} windowSec={TELEMETRY_WINDOW_SEC} height={120} />
+          </div>
+        </section>
+
         <section className={`panel ${fullscreenPanel === 'heart' ? 'fullscreen' : ''}`}>
-          <PanelHeading title="Heart Observatory" subtitle="Derived from PPG">
+          <PanelHeading title="Heart Observatory" subtitle="PPG heart rate + SpO2 estimate">
             <PanelControls>
               <PanelControlButton
                 pressed={fullscreenPanel === 'heart'}
@@ -1068,13 +1610,39 @@ function App() {
               </PanelControlButton>
             </PanelControls>
           </PanelHeading>
-          <p className="subdued">Combined PPG pulse trace with a live heart rate estimate.</p>
+          <p className="subdued">Combined PPG pulse trace, cardiogram, and SpO2 (ratio-of-ratios).</p>
+          <p className="subdued">
+            SpO2 debug: IR={heartData.spo2Labels?.ir || '—'} ({heartData.ppgChannelsAll?.find(c => c.label === heartData.spo2Labels?.ir)?.samples?.length || 0})
+            · RED={heartData.spo2Labels?.red || '—'} ({heartData.ppgChannelsAll?.find(c => c.label === heartData.spo2Labels?.red)?.samples?.length || 0})
+            · {heartData.spo2Debug?.ok ? 'OK' : `BLOCKED (${heartData.spo2Debug?.reason || 'NO_DATA'})`}
+            {heartData.spo2Debug?.piIr != null && heartData.spo2Debug?.piRed != null
+              ? ` PI=${heartData.spo2Debug.piIr.toFixed(4)}/${heartData.spo2Debug.piRed.toFixed(4)}`
+              : ''}
+            {heartData.spo2Debug?.ratio != null ? ` R=${heartData.spo2Debug.ratio.toFixed(3)}` : ''}
+          </p>
           <div className="inline-status" style={{ marginBottom: 10 }}>
             <span className="status-pill">
               Heart rate: {heartData.heartRateBpm != null ? `${heartData.heartRateBpm} bpm` : '—'}
             </span>
             <span className="status-pill">
+              Pulse channel (auto): {heartData.pulseChannelLabel || '—'}
+            </span>
+            <span className="status-pill">
+              SpO2: {heartData.spo2 != null ? `${heartData.spo2.toFixed(0)}%` : '—'}
+            </span>
+            <span className="status-pill">
+              R (red/IR): {heartData.spo2Ratio != null ? heartData.spo2Ratio.toFixed(3) : '—'}
+            </span>
+            <span className="status-pill">
+              PI (IR/Red): {heartData.perfusionIndexIr != null && heartData.perfusionIndexRed != null
+                ? `${heartData.perfusionIndexIr.toFixed(3)} / ${heartData.perfusionIndexRed.toFixed(3)}`
+                : '—'}
+            </span>
+            <span className="status-pill">
               PPG: {heartData.ppgChannels?.length ? heartData.ppgChannels.map(c => c.label).join(' + ') : '—'}
+            </span>
+            <span className="status-pill">
+              SpO2 channels: {heartData.spo2Labels ? `${heartData.spo2Labels.ir} / ${heartData.spo2Labels.red}` : '—'}
             </span>
           </div>
           {heartData.combinedPpg ? (
@@ -1082,7 +1650,7 @@ function App() {
               <div className="chart-block" style={{ marginBottom: 10 }}>
                 <p className="chart-label">PPG combined</p>
                 <EEGTraceChart
-                  samples={heartData.combinedPpg.samples}
+                  samples={heartData.combinedPpg.samples.slice(-heartObservatorySamples)}
                   height={220}
                   maxPoints={2400}
                 />
@@ -1101,7 +1669,7 @@ function App() {
               </div>
               <div className="chart-block">
                 <p className="chart-label">Heart rate (15s average)</p>
-                <TimeSeriesLineChart points={heartRateHistory} windowSec={300} height={160} />
+                <TimeSeriesLineChart points={heartRateHistory} windowSec={HEART_OBSERVATORY_WINDOW_SEC} height={160} />
               </div>
             </>
           ) : (
@@ -1450,7 +2018,57 @@ function App() {
           )}
         </section>
 
-        <section className={`panel ${fullscreenPanel === 'device-debug' ? 'fullscreen' : ''}`}>
+        <section className={`panel ${fullscreenPanel === 'downloads' ? 'fullscreen' : ''}`}>
+          <PanelHeading title="Session Exports" subtitle="Download EEG/PPG snapshots">
+            <PanelControls>
+              <PanelControlButton
+                pressed={fullscreenPanel === 'downloads'}
+                ariaLabel={fullscreenPanel === 'downloads' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                title={fullscreenPanel === 'downloads' ? 'Exit fullscreen' : 'Enter fullscreen'}
+                onClick={() => setFullscreenPanel(prev => prev === 'downloads' ? null : 'downloads')}
+              >
+                {fullscreenPanel === 'downloads' ? controlIcons.collapse : controlIcons.expand}
+              </PanelControlButton>
+            </PanelControls>
+          </PanelHeading>
+          <p className="subdued">
+            Export BrainVision EEG plus BIDS sidecars (and PPG TSV when available). Auto-download runs while streaming.
+          </p>
+          <div className="inline-status" style={{ marginBottom: 8 }}>
+            <label className="field" style={{ marginRight: 12 }}>
+              <input
+                type="checkbox"
+                checked={autoDownloadEnabled}
+                onChange={(e) => setAutoDownloadEnabled(e.target.checked)}
+              />
+              <span style={{ marginLeft: 8 }}>
+                Auto-download every {Math.max(1, Math.round(autoDownloadMs / 1000))}s
+              </span>
+            </label>
+            <span className="status-pill">
+              Next export: {autoDownloadCountdownSec != null ? `${autoDownloadCountdownSec}s` : '—'}
+            </span>
+            <span className={`status-pill ${streamStatus.isStreaming ? '' : 'warn'}`}>
+              {streamStatus.isStreaming ? 'Streaming' : 'Not streaming'}
+            </span>
+          </div>
+          {downloadLogs.length > 0 ? (
+            <div className="chart-block">
+              <p className="chart-label">Export log (last 20)</p>
+              <div className="inline-status" style={{ flexWrap: 'wrap' }}>
+                {downloadLogs.slice().reverse().map((entry) => (
+                  <span className="status-pill" key={entry.t}>
+                    {new Date(entry.t).toLocaleTimeString()} · {entry.windowSec}s window
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="subdued">No exports yet.</p>
+          )}
+        </section>
+
+        <section className={`panel device-debug ${fullscreenPanel === 'device-debug' ? 'fullscreen' : ''}`}>
           <PanelHeading title="Device Debug" subtitle="Connection + telemetry log">
             <PanelControls>
               <PanelControlButton
@@ -1466,10 +2084,13 @@ function App() {
           <p className="subdued">Full device diagnostics for troubleshooting disconnects and data flow.</p>
           {deviceDebug ? (
             <>
-              {deviceDebug.statusLog?.length > 0 ? (
+              {deviceDebug.eventLog?.length > 0 ? (
                 <pre className="debug-pre">
-                  {deviceDebug.statusLog
-                    .map((entry) => `${new Date(entry.t).toISOString()} | ${entry.status} | ${entry.message}`)
+                  {deviceDebug.eventLog
+                    .map((entry) => {
+                      const ts = new Date(entry.t).toISOString().split('T')[1].replace('Z', '');
+                      return `${ts} | ${entry.msg}`;
+                    })
                     .join('\n')}
                 </pre>
               ) : (

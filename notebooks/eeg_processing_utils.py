@@ -837,6 +837,222 @@ def combine_ppg_channels(export: dict) -> tuple[np.ndarray, float] | tuple[None,
     return combined, sampling_rate
 
 
+def _ppg_label_name(label: str) -> str:
+    if not label:
+        return ""
+    return str(label).lower()
+
+
+def infer_ppg_mapping(labels: list[str]) -> dict:
+    names = {lbl: _ppg_label_name(lbl) for lbl in labels}
+    if not labels:
+        return {"ambient": None, "infrared": None, "red": None}
+    ambient = next((lbl for lbl, name in names.items() if name in {"ambient"} or "ambient" in name or "green" in name), None)
+    infrared = next((lbl for lbl, name in names.items() if name in {"ir", "infrared"} or "infrared" in name or name == "ir"), None)
+    red = next((lbl for lbl, name in names.items() if name in {"red"} or "red" in name), None)
+    if ambient is None and "PPG1" in labels:
+        ambient = "PPG1"
+    if infrared is None and "PPG2" in labels:
+        infrared = "PPG2"
+    if red is None and "PPG3" in labels:
+        red = "PPG3"
+    return {"ambient": ambient, "infrared": infrared, "red": red}
+
+
+def subtract_ambient_ppg(export: dict) -> dict:
+    channels = export.get("channels", []) or []
+    labels = [c.get("label") for c in channels]
+    mapping = infer_ppg_mapping(labels)
+    ambient_label = mapping.get("ambient")
+    if not ambient_label:
+        return export
+    ambient = next((c for c in channels if c.get("label") == ambient_label), None)
+    if ambient is None:
+        return export
+    ambient_samples = np.asarray(ambient.get("samples", []) or [], dtype=float)
+    if ambient_samples.size == 0:
+        return export
+    cleaned_channels = []
+    for ch in channels:
+        samples = np.asarray(ch.get("samples", []) or [], dtype=float)
+        if ch.get("label") in (mapping.get("infrared"), mapping.get("red")):
+            n = min(len(samples), len(ambient_samples))
+            if n > 0:
+                samples = samples[-n:] - ambient_samples[-n:]
+        cleaned_channels.append({ **ch, "samples": samples.tolist() })
+    return { **export, "channels": cleaned_channels }
+
+
+def _biquad_coefficients(filter_type: str, cutoff_hz: float, sample_rate_hz: float, q: float = np.sqrt(0.5)):
+    omega = 2 * np.pi * cutoff_hz / sample_rate_hz
+    sin = np.sin(omega)
+    cos = np.cos(omega)
+    alpha = sin / (2 * q)
+    if filter_type == "lowpass":
+        b0 = (1 - cos) / 2
+        b1 = 1 - cos
+        b2 = (1 - cos) / 2
+        a0 = 1 + alpha
+        a1 = -2 * cos
+        a2 = 1 - alpha
+    elif filter_type == "highpass":
+        b0 = (1 + cos) / 2
+        b1 = -(1 + cos)
+        b2 = (1 + cos) / 2
+        a0 = 1 + alpha
+        a1 = -2 * cos
+        a2 = 1 - alpha
+    else:
+        raise ValueError(f"Unsupported filter_type={filter_type}")
+    return {
+        "b0": b0 / a0,
+        "b1": b1 / a0,
+        "b2": b2 / a0,
+        "a1": a1 / a0,
+        "a2": a2 / a0,
+    }
+
+
+def _apply_biquad(samples: np.ndarray, coeffs: dict) -> np.ndarray:
+    out = np.zeros_like(samples, dtype=float)
+    x1 = x2 = y1 = y2 = 0.0
+    b0, b1, b2 = coeffs["b0"], coeffs["b1"], coeffs["b2"]
+    a1, a2 = coeffs["a1"], coeffs["a2"]
+    for i, x0 in enumerate(samples):
+        y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        out[i] = y0
+        x2, x1 = x1, x0
+        y2, y1 = y1, y0
+    return out
+
+
+def ppg_lowpass(samples: np.ndarray, cutoff_hz: float, sample_rate_hz: float) -> np.ndarray:
+    coeffs = _biquad_coefficients("lowpass", cutoff_hz, sample_rate_hz)
+    return _apply_biquad(_apply_biquad(samples, coeffs), coeffs)
+
+
+def ppg_bandpass(samples: np.ndarray, low_hz: float, high_hz: float, sample_rate_hz: float) -> np.ndarray:
+    hp = _biquad_coefficients("highpass", low_hz, sample_rate_hz)
+    lp = _biquad_coefficients("lowpass", high_hz, sample_rate_hz)
+    return _apply_biquad(_apply_biquad(samples, hp), lp)
+
+
+def _percentile(samples: np.ndarray, q: float) -> float:
+    if samples.size == 0:
+        return 0.0
+    return float(np.percentile(samples, q * 100))
+
+
+def _detrend(samples: np.ndarray) -> np.ndarray:
+    if samples.size == 0:
+        return samples
+    return samples - np.mean(samples)
+
+
+def find_ppg_peaks(samples: np.ndarray, sample_rate_hz: float, min_spacing_sec: float = 0.4) -> list[int]:
+    if samples.size < 3:
+        return []
+    median = _percentile(samples, 0.5)
+    mad = _percentile(np.abs(samples - median), 0.5) or 1e-6
+    threshold = median + 1.25 * mad
+    min_spacing = max(1, int(round(sample_rate_hz * min_spacing_sec)))
+    peaks = []
+    last_peak = -10**9
+    for i in range(1, len(samples) - 1):
+        v = samples[i]
+        if v < threshold:
+            continue
+        if v > samples[i - 1] and v > samples[i + 1]:
+            if i - last_peak >= min_spacing:
+                peaks.append(i)
+                last_peak = i
+            else:
+                if peaks and v > samples[peaks[-1]]:
+                    peaks[-1] = i
+                    last_peak = i
+    return peaks
+
+
+def compute_ppg_hr(samples: np.ndarray, sample_rate_hz: float, bpm_min: float = 35, bpm_max: float = 220) -> float | None:
+    if samples.size < sample_rate_hz * 3:
+        return None
+    filtered = ppg_bandpass(_detrend(samples), 0.5, 4.0, sample_rate_hz)
+    peaks = find_ppg_peaks(filtered, sample_rate_hz)
+    if len(peaks) < 2:
+        return None
+    intervals = np.diff(peaks)
+    median_samples = np.median(intervals)
+    if median_samples <= 0:
+        return None
+    bpm = 60 * sample_rate_hz / median_samples
+    if bpm < bpm_min or bpm > bpm_max:
+        return None
+    return float(round(bpm))
+
+
+def build_ppg_cardiogram(samples: np.ndarray, sample_rate_hz: float, beats: int = 5) -> np.ndarray | None:
+    if samples.size < sample_rate_hz * 3:
+        return None
+    filtered = ppg_bandpass(_detrend(samples), 0.5, 4.0, sample_rate_hz)
+    peaks = find_ppg_peaks(filtered, sample_rate_hz)
+    if len(peaks) < 2:
+        return None
+    segments = []
+    start = max(1, len(peaks) - beats)
+    for i in range(start, len(peaks)):
+        a = peaks[i - 1]
+        b = peaks[i]
+        if b > a:
+            segments.append(filtered[a:b])
+    if not segments:
+        return None
+    return np.concatenate(segments)
+
+
+def compute_spo2_metrics(ir_samples: np.ndarray, red_samples: np.ndarray, sample_rate_hz: float, window_sec: float = 8.0):
+    window_samples = max(1, int(round(window_sec * sample_rate_hz)))
+    if ir_samples.size < window_samples or red_samples.size < window_samples:
+        return None
+    ir_window = ir_samples[-window_samples:]
+    red_window = red_samples[-window_samples:]
+    ir_dc = ppg_lowpass(ir_window, 0.5, sample_rate_hz)
+    red_dc = ppg_lowpass(red_window, 0.5, sample_rate_hz)
+    ir_dc_mean = abs(np.mean(ir_dc))
+    red_dc_mean = abs(np.mean(red_dc))
+    if ir_dc_mean <= 0 or red_dc_mean <= 0:
+        return None
+    ir_ac = ppg_bandpass(_detrend(ir_window), 0.5, 4.0, sample_rate_hz)
+    red_ac = ppg_bandpass(_detrend(red_window), 0.5, 4.0, sample_rate_hz)
+    ir_ac_amp = (_percentile(ir_ac, 0.95) - _percentile(ir_ac, 0.05)) / 2
+    red_ac_amp = (_percentile(red_ac, 0.95) - _percentile(red_ac, 0.05)) / 2
+    if ir_ac_amp <= 0 or red_ac_amp <= 0:
+        return None
+    pi_ir = ir_ac_amp / ir_dc_mean
+    pi_red = red_ac_amp / red_dc_mean
+    if pi_ir <= 0 or pi_red <= 0:
+        return None
+    ratio = pi_red / pi_ir
+    spo2 = 110 - 25 * ratio
+    spo2 = float(np.clip(spo2, 80, 100))
+    return {"spo2": spo2, "ratio": float(ratio), "pi_ir": float(pi_ir), "pi_red": float(pi_red)}
+
+
+def compute_spo2_series(ir_samples: np.ndarray, red_samples: np.ndarray, sample_rate_hz: float,
+                        window_sec: float = 8.0, step_sec: float = 1.0) -> pd.DataFrame:
+    window = max(1, int(round(window_sec * sample_rate_hz)))
+    step = max(1, int(round(step_sec * sample_rate_hz)))
+    rows = []
+    for start in range(0, min(len(ir_samples), len(red_samples)) - window + 1, step):
+        ir_window = ir_samples[start:start + window]
+        red_window = red_samples[start:start + window]
+        metrics = compute_spo2_metrics(ir_window, red_window, sample_rate_hz, window_sec=window_sec)
+        if metrics is None:
+            continue
+        t_sec = (start + window / 2) / sample_rate_hz
+        rows.append({ "t_sec": t_sec, **metrics })
+    return pd.DataFrame(rows)
+
+
 def combine_ppg_exports(exports: list[dict]) -> dict | None:
     exports = [e for e in (exports or []) if e]
     if not exports:
@@ -1509,6 +1725,18 @@ def compute_band_power_timeseries(
     line_noise_band_hz: float = 2.0,
     line_noise_max_hz: float | None = 80.0,
 ) -> pd.DataFrame:
+    value_cols_abs = [f"{key}_abs" for key in BANDS.keys()]
+    value_cols_rel = [f"{key}_rel" for key in BANDS.keys()]
+    expected_cols = [
+        "t_sec",
+        "timestamp",
+        "amplitude_range",
+        "line_noise_ratio",
+        "amplitude_artifact",
+        "line_noise_artifact",
+        *value_cols_abs,
+        *value_cols_rel,
+    ]
     if step_samples is None:
         step_samples = NPERSEG // 2
     # If samples is a pandas Series with datetime index, use it for timestamps
@@ -1516,7 +1744,7 @@ def compute_band_power_timeseries(
     sample_index = samples.index if is_series else None
     samples_arr = samples.to_numpy(dtype=float) if is_series else np.asarray(samples, dtype=float)
     if len(samples_arr) < NPERSEG:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=expected_cols)
     nperseg = NPERSEG
     noverlap = max(0, nperseg - step_samples)
     spec = compute_spectrogram_psd(
@@ -1529,7 +1757,7 @@ def compute_band_power_timeseries(
         apply_filters=True,
     )
     if spec is None:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=expected_cols)
     freqs_win, times, psd = spec
 
     rows = []
@@ -1574,7 +1802,7 @@ def compute_band_power_timeseries(
             row[f"{key}_abs"] = value["absolute"]
             row[f"{key}_rel"] = value["relative"]
         rows.append(row)
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=expected_cols)
     # If no timestamp column, leave as None; if t_sec and base timestamp available, reconstruct
     if 'timestamp' in df.columns and df['timestamp'].isnull().all():
         df = df.drop(columns=['timestamp'])

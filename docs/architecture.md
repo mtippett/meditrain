@@ -21,12 +21,14 @@ graph TB
     end
 
     subgraph Processing
-        DeviceControl --> Periodograms
-        DeviceControl --> ArtifactDetection
+        App --> EegProcessingHooks
+        App --> PpgProcessingHooks
     end
 
     MuseData -.-> |RawEEG/PPG|DeviceControl
-    DeviceControl -.-> |EEG/PPG buffers, periodograms, artifacts|App
+    DeviceControl -.-> |Raw EEG/PPG packets + channel map|App
+    EegProcessingHooks -.-> |EEG buffers, periodograms, artifacts|App
+    PpgProcessingHooks -.-> |Heart metrics|App
     App -.-> |Band snapshots & targets|BandPower
     App -.-> |Target metrics|TrainingView
     App -.-> |Exports|ExportDownload
@@ -62,7 +64,7 @@ possible; artifact detection happens during processing.
 ```
 
 ### Processing
-`DeviceControl` converts raw samples into FFT periodograms and computes artifact windows.
+`App` owns processing hooks that convert raw samples into FFT periodograms and artifact windows.
 Artifacts are reported per electrode so UI overlays can indicate rejection windows.
 
 ### Band Power
@@ -94,5 +96,11 @@ Audio feedback uses target distance and sensitivity to attenuate output.
 ```
 
 ### Logging/Archiving
-Exports include raw EEG/PPG data plus sidecar JSON that captures targets, target history, and
-processing configuration for session analysis.
+Exports include BrainVision EEG plus BIDS sidecars that capture targets, target history, and
+processing configuration for session analysis. Optional PPG TSV/sidecar is included when present.
+
+## Development Patterns
+- Processing stays in `App`-owned hooks; visual components consume derived state only.
+- Rolling buffers are capped and windowed with explicit sample-rate conversions.
+- Time-series visuals use the shared line chart component; bespoke SVGs are reserved for trace/overlay charts.
+- Keep data contracts aligned with `docs/design.md` and `docs/requirements.md`.

@@ -1,8 +1,16 @@
 import React from 'react';
 
-function ConfigWeights({ availableChannels, selectedChannels, onToggleChannel }) {
+function ConfigWeights({
+  title,
+  helperText = 'Selected sensors contribute to averaged views and the spectrogram.',
+  emptyText = 'No channels detected yet.',
+  availableChannels,
+  selectedChannels,
+  onToggleChannel
+}) {
   return (
     <div className="config-weights">
+      {title ? <p className="chart-label">{title}</p> : null}
       <div className="config-list">
         {availableChannels.map((ch) => (
           <label key={ch} className="config-option">
@@ -14,9 +22,9 @@ function ConfigWeights({ availableChannels, selectedChannels, onToggleChannel })
             <span>{ch}</span>
           </label>
         ))}
-        {availableChannels.length === 0 && <p className="subdued">No channels detected yet.</p>}
+        {availableChannels.length === 0 && <p className="subdued">{emptyText}</p>}
       </div>
-      <p className="subdued">Selected sensors contribute to averaged views and the spectrogram.</p>
+      {helperText ? <p className="subdued">{helperText}</p> : null}
     </div>
   );
 }

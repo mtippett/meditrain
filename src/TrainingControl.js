@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BAND_KEYS } from './constants/bands';
+import LineChart from './ui/LineChart';
 
 function TrainingControl({ availableChannels = [], selectedTargets = [], bandSnapshots = [], bandHistory = {}, targetHistoryById = {}, deltaSmoothingSec = 10, onSaveTarget, onDeleteTarget, audioEnabled, onToggleAudio, presets = [], presetsLoading = false, presetsError = null, onApplyPreset, onClearTargets, targetMetrics = {} }) {
   const [form, setForm] = useState({
@@ -144,21 +145,28 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
     const chartHeight = 140;
     const paddingTop = 10;
     const paddingBottom = 14;
-    const plotHeight = chartHeight - paddingTop - paddingBottom;
     const hasSignal = points && points.length > 1;
     const hasTargets = targetSeries && targetSeries.length > 0;
     if (!hasSignal && !hasTargets) {
       return (
-        <svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="none">
-          <text x="8" y={chartHeight / 2} fill="rgba(255,255,255,0.5)" fontSize="10">No recent data</text>
-        </svg>
+        <LineChart
+          height={chartHeight}
+          width={chartWidth}
+          padding={{ left: 0, right: 0, top: paddingTop, bottom: paddingBottom }}
+          series={[]}
+          bands={[]}
+          showAxes={false}
+          showLabels={false}
+          emptyLabel="No recent data"
+          emptyLabelX={8}
+          emptyLabelY={chartHeight / 2}
+        />
       );
     }
     const timePoints = [...(points || []), ...(targetSeries || [])].filter(p => p && p.t != null);
     const times = timePoints.map(p => p.t);
     const start = Math.min(...times);
     const end = Math.max(...times);
-    const span = Math.max(1, end - start);
     const signalValues = (points || []).map(p => p.v);
     const targetValues = (targetSeries || []).flatMap(p => {
       const tol = p.tolerance || 0;
@@ -167,79 +175,64 @@ function TrainingControl({ availableChannels = [], selectedTargets = [], bandSna
     const values = [...signalValues, ...targetValues].filter(v => typeof v === 'number');
     const min = Math.min(...values);
     const max = Math.max(...values);
-    const range = Math.max(0.0001, max - min);
-    const yScale = (value) => (chartHeight - paddingBottom) - ((value - min) / range) * plotHeight;
-    const poly = (points || []).map((p) => {
-      const x = ((p.t - start) / span) * chartWidth;
-      const y = yScale(p.v);
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    });
     const sortedTargets = (targetSeries || []).slice().sort((a, b) => a.t - b.t);
-    const targetLine = sortedTargets.map((p) => {
-      const x = ((p.t - start) / span) * chartWidth;
-      const y = yScale(p.target);
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    });
     const targetBandPoints = sortedTargets.length > 0
       ? [
-        ...sortedTargets.map((p) => {
-          const x = ((p.t - start) / span) * chartWidth;
-          const y = yScale(p.target + (p.tolerance || 0));
-          return `${x.toFixed(2)},${y.toFixed(2)}`;
-        }),
-        ...sortedTargets.slice().reverse().map((p) => {
-          const x = ((p.t - start) / span) * chartWidth;
-          const y = yScale(p.target - (p.tolerance || 0));
-          return `${x.toFixed(2)},${y.toFixed(2)}`;
-        })
+        ...sortedTargets.map((p) => ({
+          x: p.t,
+          y: p.target + (p.tolerance || 0)
+        })),
+        ...sortedTargets.slice().reverse().map((p) => ({
+          x: p.t,
+          y: p.target - (p.tolerance || 0)
+        }))
       ]
       : [];
+    const series = [];
+    if (sortedTargets.length > 0) {
+      series.push({
+        id: 'target',
+        points: sortedTargets.map(p => ({ x: p.t, y: p.target })),
+        stroke: 'rgba(248, 113, 113, 0.85)',
+        strokeWidth: 1.5,
+        extend: sortedTargets.length === 1 ? 'x' : undefined
+      });
+    }
+    if (sortedTargets.length <= 1 && targetBandPoints.length > 0) {
+      series.push({
+        id: 'target-band',
+        points: [{ x: targetBandPoints[0].x, y: targetBandPoints[0].y }],
+        stroke: 'rgba(248, 113, 113, 0.4)',
+        strokeWidth: 1,
+        strokeDasharray: '3 2',
+        extend: 'x'
+      });
+    }
+    if (hasSignal) {
+      series.push({
+        id: 'signal',
+        points: (points || []).map(p => ({ x: p.t, y: p.v })),
+        stroke: 'rgba(96, 165, 250, 0.9)',
+        strokeWidth: 2
+      });
+    }
+
     return (
-      <svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="none">
-        {targetBandPoints.length > 2 && (
-          <polygon
-            fill="rgba(248, 113, 113, 0.18)"
-            points={targetBandPoints.join(' ')}
-          />
-        )}
-        {targetLine.length > 1 && (
-          <polyline
-            fill="none"
-            stroke="rgba(248, 113, 113, 0.85)"
-            strokeWidth="1.5"
-            points={targetLine.join(' ')}
-          />
-        )}
-        {targetLine.length === 1 && (
-          <line
-            x1="0"
-            x2={chartWidth}
-            y1={targetLine[0].split(',')[1]}
-            y2={targetLine[0].split(',')[1]}
-            stroke="rgba(248, 113, 113, 0.85)"
-            strokeWidth="1.5"
-          />
-        )}
-        {targetBandPoints.length > 0 && targetLine.length <= 1 && (
-          <line
-            x1="0"
-            x2={chartWidth}
-            y1={targetBandPoints[0].split(',')[1]}
-            y2={targetBandPoints[0].split(',')[1]}
-            stroke="rgba(248, 113, 113, 0.4)"
-            strokeWidth="1"
-            strokeDasharray="3 2"
-          />
-        )}
-        {hasSignal && (
-          <polyline
-            fill="none"
-            stroke="rgba(96, 165, 250, 0.9)"
-            strokeWidth="2"
-            points={poly.join(' ')}
-          />
-        )}
-      </svg>
+      <LineChart
+        height={chartHeight}
+        width={chartWidth}
+        padding={{ left: 0, right: 0, top: paddingTop, bottom: paddingBottom }}
+        series={series}
+        bands={targetBandPoints.length > 2 ? [{
+          id: 'target-band-fill',
+          points: targetBandPoints,
+          fill: 'rgba(248, 113, 113, 0.18)'
+        }] : []}
+        xDomain={{ min: start, max: end }}
+        yDomain={{ min, max }}
+        showAxes={false}
+        showLabels={false}
+      />
     );
   }
 

@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import LineChart from './LineChart';
 
 function TimeSeriesLineChart({ points = [], height = 140, windowSec = 300, stroke = '#4ade80' }) {
   const series = useMemo(() => {
@@ -15,48 +16,31 @@ function TimeSeriesLineChart({ points = [], height = 140, windowSec = 300, strok
       start,
       end,
       values: filtered,
-      min: min - pad,
-      max: max + pad
+      yMin: min - pad,
+      yMax: max + pad
     };
   }, [points, windowSec]);
-
-  if (!series) {
-    return <p className="subdued">No samples to plot.</p>;
-  }
 
   const marginLeft = 32;
   const marginBottom = 18;
   const viewWidth = marginLeft + windowSec;
-  const innerHeight = Math.max(1, height - marginBottom);
-  const windowMs = series.end - series.start || 1;
-  const range = series.max - series.min || 1;
-
-  const pointsAttr = series.values.map((p) => {
-    const x = marginLeft + ((p.t - series.start) / windowMs) * (viewWidth - marginLeft);
-    const y = innerHeight - ((p.v - series.min) / range) * innerHeight;
-    return `${x},${y}`;
-  }).join(' ');
 
   return (
-    <svg
-      width="100%"
+    <LineChart
       height={height}
-      viewBox={`0 0 ${viewWidth} ${height}`}
-      preserveAspectRatio="none"
-      style={{ display: 'block', width: '100%' }}
-    >
-      <polyline
-        fill="none"
-        stroke={stroke}
-        strokeWidth="1.4"
-        points={pointsAttr}
-      />
-      <line x1={marginLeft} y1="0" x2={marginLeft} y2={innerHeight} stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
-      <line x1={marginLeft} y1={innerHeight} x2={viewWidth} y2={innerHeight} stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
-      <text x="4" y="10" fill="rgba(255,255,255,0.6)" fontSize="10">{series.max.toFixed(0)}</text>
-      <text x="4" y={innerHeight - 2} fill="rgba(255,255,255,0.6)" fontSize="10">{series.min.toFixed(0)}</text>
-      <text x={marginLeft} y={height - 2} fill="rgba(255,255,255,0.6)" fontSize="10">time</text>
-    </svg>
+      width={viewWidth}
+      padding={{ left: marginLeft, right: 0, top: 0, bottom: marginBottom }}
+      series={series ? [{
+        id: 'primary',
+        points: series.values.map(p => ({ x: p.t, y: p.v })),
+        stroke,
+        strokeWidth: 1.4
+      }] : []}
+      xDomain={series ? { min: series.start, max: series.end } : undefined}
+      yDomain={series ? { min: series.yMin, max: series.yMax } : undefined}
+      emptyLabel="No samples to plot."
+      yLabelFormatter={(value) => value.toFixed(0)}
+    />
   );
 }
 

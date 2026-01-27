@@ -274,6 +274,18 @@ button:active {
   color: rgba(255, 255, 255, 0.75);
 }
 
+.panel.device-debug {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel.device-debug.fullscreen .debug-pre {
+  max-height: none;
+  flex: 1;
+  min-height: 0;
+}
+
 .chart-block.chart-fill {
   display: flex;
   flex-direction: column;
