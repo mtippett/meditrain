@@ -129,8 +129,23 @@ const MuseData = React.forwardRef(function MuseData(
           addDebugStep('Querying permitted devices (getDevices)...');
           const devices = await navigator.bluetooth.getDevices();
           addDebugStep(`Found ${devices.length} permitted devices.`);
-          
-          const museDevice = devices.find(d => d.name && d.name.indexOf('Muse') >= 0);
+
+          const museDevices = devices.filter(d => d.name && d.name.indexOf('Muse') >= 0);
+          if (museDevices.length > 0) {
+            addDebugStep(`Permitted Muse devices: ${museDevices.length}`);
+            museDevices.forEach((d, idx) => {
+              const idShort = d.id ? d.id.slice(0, 8) : 'unknown-id';
+              const gattConnected = !!d.gatt?.connected;
+              const adSupport = typeof d.watchAdvertisements === 'function' ? 'yes' : 'no';
+              addDebugStep(
+                `Muse[${idx + 1}]: ${d.name || 'Unnamed'} (id: ${idShort}…, gatt: ${gattConnected ? 'connected' : 'disconnected'}, ads: ${adSupport})`
+              );
+            });
+          } else {
+            addDebugStep('No permitted Muse devices found in getDevices result.');
+          }
+
+          const museDevice = museDevices[0];
           if (museDevice) {
             addDebugStep(`Found target: ${museDevice.name} (${museDevice.id})`);
 

@@ -3,11 +3,11 @@ import LineChart from './LineChart';
 
 function TimeSeriesLineChart({ points = [], height = 140, windowSec = 300, stroke = '#4ade80' }) {
   const series = useMemo(() => {
-    if (!points || points.length < 2) return null;
-    const end = points[points.length - 1].t || Date.now();
+    if (!points || points.length === 0) return null;
+    const end = Date.now();
     const start = end - windowSec * 1000;
     const filtered = points.filter(p => p.t >= start && p.t <= end);
-    if (filtered.length < 2) return null;
+    if (filtered.length === 0) return null;
     const values = filtered.map(p => p.v);
     const min = Math.min(...values);
     const max = Math.max(...values);
@@ -24,6 +24,11 @@ function TimeSeriesLineChart({ points = [], height = 140, windowSec = 300, strok
   const marginLeft = 32;
   const marginBottom = 18;
   const viewWidth = marginLeft + windowSec;
+  const tickFormatter = (value) => {
+    if (!series) return '';
+    const remaining = Math.max(0, Math.round((series.end - value) / 1000));
+    return remaining === 0 ? 'now' : `-${remaining}s`;
+  };
 
   return (
     <LineChart
@@ -38,6 +43,9 @@ function TimeSeriesLineChart({ points = [], height = 140, windowSec = 300, strok
       }] : []}
       xDomain={series ? { min: series.start, max: series.end } : undefined}
       yDomain={series ? { min: series.yMin, max: series.yMax } : undefined}
+      xTickCount={4}
+      xTickFormatter={tickFormatter}
+      xLabel=""
       emptyLabel="No samples to plot."
       yLabelFormatter={(value) => value.toFixed(0)}
     />

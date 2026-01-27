@@ -12,6 +12,8 @@ function LineChart({
   showLabels = true,
   xLabel = 'time',
   rectOverlays = [],
+  xTickCount = 4,
+  xTickFormatter,
   emptyLabel = 'No samples to plot.',
   emptyLabelX = 8,
   emptyLabelY,
@@ -75,6 +77,17 @@ function LineChart({
   }
 
   const axisY = padding.top + chart.innerHeight;
+  const tickCount = Math.max(2, xTickCount);
+  const xTicks = new Array(tickCount + 1).fill(0).map((_, i) => {
+    const t = i / tickCount;
+    const value = chart.xMin + (chart.xMax - chart.xMin) * t;
+    return { value, x: chart.scaleX(value) };
+  });
+  const formatXTick = xTickFormatter || ((value) => {
+    const spanSec = Math.max(1, (chart.xMax - chart.xMin) / 1000);
+    const remaining = Math.max(0, Math.round((chart.xMax - value) / 1000));
+    return remaining === 0 ? 'now' : `-${Math.min(remaining, spanSec)}s`;
+  });
 
   return (
     <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
@@ -141,6 +154,17 @@ function LineChart({
         <>
           <line x1={padding.left} y1={padding.top} x2={padding.left} y2={axisY} stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
           <line x1={padding.left} y1={axisY} x2={padding.left + chart.innerWidth} y2={axisY} stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
+          {xTicks.map((tick, idx) => (
+            <line
+              key={`xtick-${idx}`}
+              x1={tick.x}
+              x2={tick.x}
+              y1={axisY}
+              y2={axisY + 4}
+              stroke="rgba(255,255,255,0.35)"
+              strokeWidth="1"
+            />
+          ))}
         </>
       )}
       {showLabels && (
@@ -148,6 +172,22 @@ function LineChart({
           <text x="4" y="10" fill="rgba(255,255,255,0.6)" fontSize="10">{yLabelFormatter(chart.yMax)}</text>
           <text x="4" y={axisY - 2} fill="rgba(255,255,255,0.6)" fontSize="10">{yLabelFormatter(chart.yMin)}</text>
           <text x={padding.left} y={height - 2} fill="rgba(255,255,255,0.6)" fontSize="10">{xLabel}</text>
+          {xTicks.map((tick, idx) => {
+            const label = formatXTick(tick.value);
+            const anchor = idx === 0 ? 'start' : idx === xTicks.length - 1 ? 'end' : 'middle';
+            return (
+              <text
+                key={`xlabel-${idx}`}
+                x={tick.x}
+                y={height - 2}
+                textAnchor={anchor}
+                fill="rgba(255,255,255,0.6)"
+                fontSize="10"
+              >
+                {label}
+              </text>
+            );
+          })}
         </>
       )}
     </svg>

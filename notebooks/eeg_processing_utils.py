@@ -1,22 +1,13 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 
-def to_local_datetime_index(ts):
-    """Convert a pandas Series or DatetimeIndex to local timezone and return as DatetimeIndex."""
-    import tzlocal
-    local_tz = tzlocal.get_localzone()
-    ts = pd.to_datetime(ts)
-    if ts.dt.tz is None:
-        ts = ts.dt.tz_localize('UTC')
-    return ts.dt.tz_convert(local_tz)
+_THIS_DIR = Path(__file__).parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.append(str(_THIS_DIR))
 
-
-def _format_time_axis(ax, min_ticks=10):
-    import matplotlib.dates as mdates
-    import tzlocal
-    local_tz = tzlocal.get_localzone()
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=min_ticks))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S %Z', tz=local_tz))
+from chart_utils import _format_time_axis, to_local_datetime_index
 
 import json
 import re
@@ -474,11 +465,8 @@ def plot_artifact_overlays_and_metrics(
         ts_df = series_by_label.get(label, pd.DataFrame())
         if ts_df.empty:
             continue
-        if trace_window_sec is not None:
-            cutoff = ts_df["t_sec"].max() - trace_window_sec
-            ts_plot = ts_df[ts_df["t_sec"] >= cutoff].copy()
-        else:
-            ts_plot = ts_df
+        # Notebook requirement: charts should use the full dataset time range.
+        ts_plot = ts_df
         if ts_plot.empty:
             continue
         if len(ts_plot) > trace_max_points:
@@ -505,10 +493,14 @@ def plot_artifact_overlays_and_metrics(
         if x_is_time:
             import tzlocal
             ts = to_local_datetime_index(ts_plot["timestamp"]).reset_index(drop=True)
+            ts_min = ts.min()
+            ts_max = ts.max()
             ax.plot(ts, ts_plot["sample"], color="#38bdf8", linewidth=0.8)
             ax.set_xlabel("Local Date/Time")
-            _format_time_axis(ax)
-            fig.autofmt_xdate()
+            _format_time_axis(ax, x_min=ts_min, x_max=ts_max)
+            span_sec = max(0, int((ts_max - ts_min).total_seconds()))
+            if span_sec <= 60 * 60 * 24 * 60:
+                fig.autofmt_xdate()
         else:
             ax.plot(ts_plot["t_sec"], ts_plot["sample"], color="#38bdf8", linewidth=0.8)
             ax.set_xlabel("Seconds")
@@ -576,12 +568,16 @@ def plot_artifact_overlays_and_metrics(
             if "timestamp" in subset.columns and subset["timestamp"].notna().any():
                 import tzlocal
                 ts = to_local_datetime_index(subset["timestamp"]).reset_index(drop=True)
+                ts_min = ts.min()
+                ts_max = ts.max()
                 axes[0].plot(ts, subset["amplitude_range"], color="#f97316", linewidth=1.0)
                 axes[1].plot(ts, subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
                 axes[1].set_xlabel("Local Date/Time")
-                _format_time_axis(axes[0])
-                _format_time_axis(axes[1])
-                fig.autofmt_xdate()
+                _format_time_axis(axes[0], x_min=ts_min, x_max=ts_max)
+                _format_time_axis(axes[1], x_min=ts_min, x_max=ts_max)
+                span_sec = max(0, int((ts_max - ts_min).total_seconds()))
+                if span_sec <= 60 * 60 * 24 * 60:
+                    fig.autofmt_xdate()
             else:
                 axes[0].plot(subset["t_sec"], subset["amplitude_range"], color="#f97316", linewidth=1.0)
                 axes[1].plot(subset["t_sec"], subset["line_noise_ratio"], color="#60a5fa", linewidth=1.0)
@@ -1173,11 +1169,15 @@ def plot_cardiogram(
     if start_timestamp is not None:
         ts = pd.to_datetime(start_timestamp) + pd.to_timedelta(t_plot, unit='s')
         ts = to_local_datetime_index(pd.Series(ts))
+        start_ts_local = ts.min()
+        end_ts_local = ts.max()
         ax.plot(ts, samples_plot, linewidth=0.8, color='#4ade80')
         ax.set_xlabel("Local Date/Time")
-        _format_time_axis(ax)
+        _format_time_axis(ax, x_min=start_ts_local, x_max=end_ts_local)
         if ax.get_figure() is not None:
-            ax.get_figure().autofmt_xdate()
+            span_sec = max(0, int((end_ts_local - start_ts_local).total_seconds()))
+            if span_sec <= 60 * 60 * 24 * 60:
+                ax.get_figure().autofmt_xdate()
     else:
         ax.plot(t_plot, samples_plot, linewidth=0.8, color='#4ade80')
         ax.set_xlabel("Time (s)")
@@ -1207,11 +1207,15 @@ def plot_heart_rate(
     if start_timestamp is not None:
         ts = pd.to_datetime(start_timestamp) + pd.to_timedelta(hr_series["t_sec"], unit='s')
         ts = to_local_datetime_index(pd.Series(ts))
+        ts_min = ts.min()
+        ts_max = ts.max()
         ax.plot(ts, hr_series["bpm"], color='#facc15', linewidth=1.4)
         ax.set_xlabel("Local Date/Time")
-        _format_time_axis(ax)
+        _format_time_axis(ax, x_min=ts_min, x_max=ts_max)
         if ax.get_figure() is not None:
-            ax.get_figure().autofmt_xdate()
+            span_sec = max(0, int((ts_max - ts_min).total_seconds()))
+            if span_sec <= 60 * 60 * 24 * 60:
+                ax.get_figure().autofmt_xdate()
     else:
         ax.plot(hr_series["t_sec"], hr_series["bpm"], color='#facc15', linewidth=1.4)
         ax.set_xlabel("Time (s)")
@@ -1410,7 +1414,8 @@ def load_label_timeseries(exports: list[dict], label: str) -> pd.DataFrame:
 
     out = pd.concat(frames, ignore_index=True)
     out = out.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    out = out.drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+    # Preserve full session coverage across exports; do not collapse same timestamps from different files.
+    out = out.drop_duplicates(subset=["timestamp", "file"]).reset_index(drop=True)
 
     if not out.empty:
         sampling_rate = out["sampling_rate_hz"].iloc[0]
@@ -1531,10 +1536,12 @@ def plot_raw_traces_per_label(
                 ax.plot(ts[start:end], y[start:end], linewidth=0.8, color="#38bdf8")
         ax.set_ylabel(lbl)
         ax.grid(True, alpha=0.2)
-        _format_time_axis(ax)
+        _format_time_axis(ax, x_min=start_ts_local, x_max=end_ts_local)
 
     axes[-1].set_xlabel("Local Date/Time")
-    fig.autofmt_xdate()
+    span_sec = max(0, int((end_ts_local - start_ts_local).total_seconds()))
+    if span_sec <= 60 * 60 * 24 * 60:
+        fig.autofmt_xdate()
     fig.suptitle(f"Raw {title_prefix} traces per channel (full session)", y=1.02)
     time_range_str = _get_time_range_str(diag_df)
     if time_range_str:
@@ -1602,17 +1609,7 @@ def plot_spectrograms_per_label(
         if has_ts:
             df = df.sort_values("timestamp").reset_index(drop=True)
 
-        if max_spectrogram_sec is not None:
-            max_samples = max(1, int(max_spectrogram_sec * channel_rate))
-            if has_ts:
-                cutoff = df["timestamp"].max() - pd.Timedelta(seconds=max_spectrogram_sec)
-                recent = df[df["timestamp"] >= cutoff]
-                if not recent.empty:
-                    df = recent.reset_index(drop=True)
-                elif len(df) > max_samples:
-                    df = df.iloc[-max_samples:].reset_index(drop=True)
-            elif len(df) > max_samples:
-                df = df.iloc[-max_samples:].reset_index(drop=True)
+        # Notebook requirement: charts should use the full dataset time range.
 
         if len(df) < nperseg_effective:
             continue
@@ -1675,6 +1672,8 @@ def plot_spectrograms_per_label(
         all(start_ts is not None for _, _, _, start_ts in segments)
         for segments in spec.values()
     )
+    global_x_min = None
+    global_x_max = None
 
     for ax, lbl in zip(axes, labels):
         if lbl not in spec:
@@ -1687,17 +1686,25 @@ def plot_spectrograms_per_label(
             if start_ts is not None:
                 start_ts_local = to_local_datetime_index(pd.Series([start_ts])).iloc[0]
                 x_coords = pd.DatetimeIndex(start_ts_local + pd.to_timedelta(t_vals, unit="s"))
+                if len(x_coords) > 0:
+                    global_x_min = x_coords.min() if global_x_min is None else min(global_x_min, x_coords.min())
+                    global_x_max = x_coords.max() if global_x_max is None else max(global_x_max, x_coords.max())
             else:
                 x_coords = t_vals
             pcm = ax.pcolormesh(x_coords, f_vals, Sxx_db, shading="nearest", cmap="turbo", vmin=vmin, vmax=vmax, rasterized=True)
         ax.set_ylabel(lbl)
         ax.set_ylim(0.5, max_freq_hz)
         if has_clock_time:
-            _format_time_axis(ax)
+            _format_time_axis(ax, x_min=global_x_min, x_max=global_x_max)
 
     if has_clock_time:
         axes[-1].set_xlabel("Local Date/Time")
-        fig.autofmt_xdate()
+        if global_x_min is not None and global_x_max is not None:
+            for ax in axes:
+                ax.set_xlim(global_x_min, global_x_max)
+            span_sec = max(0, int((global_x_max - global_x_min).total_seconds()))
+            if span_sec <= 60 * 60 * 24 * 60:
+                fig.autofmt_xdate()
     else:
         axes[-1].set_xlabel("Time (s)")
 
@@ -2069,7 +2076,7 @@ def plot_band_power_diagram(
                     if end - start < 2:
                         continue
                     ax.plot(ts[start:end], y[start:end], linewidth=1.4, color=colors[i % len(colors)], label=band["label"] if start == 0 else None)
-        _format_time_axis(ax)
+        _format_time_axis(ax, x_min=ts.min(), x_max=ts.max())
         import matplotlib.pyplot as plt
         plt.gcf().autofmt_xdate()
     else:

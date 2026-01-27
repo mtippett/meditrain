@@ -11,6 +11,9 @@
 - Artifact detection: compute amplitude and line-noise artifacts over rolling windows; surface rejection windows in the UI.
 - Band power analytics: calculate absolute and relative power for standard bands (delta, theta, alpha, beta, gamma); derive per-target ratios (e.g., theta/beta).
 - Visualization: toggle views for raw EEG traces, per-channel periodograms, band power history, and spectrograms; keep UI responsive while processing.
+- Visualization windows:
+  - Web app charts should render a fixed 120-second rolling window.
+  - Notebook charts should render the full available dataset time range (no rolling window truncation).
 - Training & feedback: provide training view and controls for selecting targets (band thresholds/ratios), per-target sensitivity adjustments, and audio feedback attenuation when targets are met.
 - Heart observatory: render PPG traces, cardiogram slices, and heart rate trends when PPG channels are available.
 - Logging & archiving: record session metadata (device info, channel map, timestamps), training events, band power trends, and optional raw/processed EEG for later analysis; support export with training metadata sidecars.
